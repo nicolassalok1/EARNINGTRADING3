@@ -730,9 +730,9 @@ def render_strategies_nlp_sentiment():
         "Correlation": "strategies_nlp_trading/data/correlation.csv",
     }
 
-    # Étape 1 : choix du dataset
-    st.markdown("### Étape 1/5 · Choisir un dataset")
-    choice = st.radio("Choisir le fichier (NLP)", list(datasets.keys()), key="nlp_ds_choice")
+    # Bloc 1 : choix du dataset
+    st.markdown("### 1. Choisir le dataset")
+    choice = st.radio("Fichier NLP", list(datasets.keys()), key="nlp_ds_choice")
     path = datasets[choice]
 
     try:
@@ -743,8 +743,8 @@ def render_strategies_nlp_sentiment():
 
     st.caption(f"Shape initiale : {df_nlp.shape}")
 
-    # Étape 2 : filtres (date + tickers)
-    st.markdown("### Étape 2/5 · Appliquer les filtres (dates, tickers)")
+    # Bloc 2 : filtres (date + tickers)
+    st.markdown("### 2. Filtrer par dates et tickers")
     date_cols = [c for c in df_nlp.columns if "date" in c.lower()]
     ticker_cols = [c for c in df_nlp.columns if c.lower() in {"ticker", "symbol"}]
     sentiment_cols = [c for c in df_nlp.columns if "sentiment" in c.lower()]
@@ -768,8 +768,8 @@ def render_strategies_nlp_sentiment():
 
     st.caption(f"Lignes après filtres : {len(df_nlp)}")
 
-    # Étape 3 : stats descriptives
-    st.markdown("### Étape 3/5 · Lire les statistiques clés")
+    # Bloc 3 : stats descriptives
+    st.markdown("### 3. Lire les statistiques clés")
     if sentiment_cols:
         scol = sentiment_cols[0]
         if pd.api.types.is_numeric_dtype(df_nlp[scol]):
@@ -782,8 +782,8 @@ def render_strategies_nlp_sentiment():
             counts = df_nlp[scol].value_counts().head(20)
             st.bar_chart(counts)
 
-    # Étape 4 : graphiques (timeline sentiment + corrélation éventuelle)
-    st.markdown("### Étape 4/5 · Visualiser le signal (timeline, corrélation)")
+    # Bloc 4 : graphiques (timeline sentiment + corrélation éventuelle)
+    st.markdown("### 4. Visualiser le signal (timeline, corrélation)")
     if date_cols and sentiment_cols and pd.api.types.is_numeric_dtype(df_nlp[sentiment_cols[0]]):
         scol = sentiment_cols[0]
         date_col = date_cols[0]
@@ -798,8 +798,8 @@ def render_strategies_nlp_sentiment():
             corr = num_df.corr().iloc[0, 1]
             st.metric("Corr(sentiment, return)", f"{corr:.3f}")
 
-    # Étape 5 : aperçu
-    st.markdown("### Étape 5/5 · Inspecter un extrait des données filtrées")
+    # Bloc 5 : aperçu
+    st.markdown("### 5. Inspecter un extrait des données filtrées")
     st.dataframe(df_nlp.head(200), width="stretch")
 
 
