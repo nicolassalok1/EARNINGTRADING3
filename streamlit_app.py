@@ -77,11 +77,29 @@ def load_next_csv(name, parse_dates=None):
             f"Fichier manquant : {name} (cherché dans {SOURCES_DIR})"
         )
     path = candidates[0]
-    try:
-        return pd.read_csv(path, parse_dates=parse_dates)
-    except pd.errors.ParserError:
-        # Certains CSV utilisent ';' : retente avec ce séparateur
-        return pd.read_csv(path, parse_dates=parse_dates, sep=";")
+    read_attempts = [
+        {"sep": None, "engine": None, "encoding": None},
+        {"sep": ";", "engine": None, "encoding": None},
+        {"sep": None, "engine": "python", "encoding": None},
+        {"sep": None, "engine": None, "encoding": "latin1"},
+        {"sep": ";", "engine": None, "encoding": "latin1"},
+        {"sep": None, "engine": "python", "encoding": "latin1"},
+    ]
+    last_error = None
+    for cfg in read_attempts:
+        try:
+            return pd.read_csv(
+                path,
+                parse_dates=parse_dates,
+                sep=cfg["sep"],
+                engine=cfg["engine"],
+                encoding=cfg["encoding"],
+                on_bad_lines="skip",
+            )
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise last_error
 
 
 def train_test_split_series(series, train_ratio=0.8):
@@ -411,7 +429,7 @@ def render_rl_allocation():
         df_crypto = df_crypto.set_index("Date")
         ret = df_crypto.pct_change().dropna()
         method = st.radio(
-            "Méthode de pondération",
+            "Pondération RL (crypto)",
             ["Égal pondéré", "Inverse variance"],
             key="rl_alloc_method",
         )
@@ -666,7 +684,7 @@ def render_strategies_crypto_allocation():
     df_crypto = load_next_csv(datasets[choice], parse_dates=["Date"])
     df_crypto = df_crypto.set_index("Date")
     ret = df_crypto.pct_change().dropna()
-    method = st.radio("Méthode de pondération", ["Égal pondéré", "Inverse variance"], key="strategies_alloc_method")
+    method = st.radio("Pondération stratégie (crypto)", ["Égal pondéré", "Inverse variance"], key="strategies_alloc_method")
     cov = ret.cov()
     if method == "Inverse variance":
         w = inverse_variance_weights(cov.values)
@@ -700,8 +718,8 @@ def render_strategies_rl_sp500():
 
 
 def render_strategies_nlp_sentiment():
-    st.subheader("Strategies · NLP Sentiment (données)")
-    st.write("Jeu de données texte/sentiment utilisé dans le notebook NLP.")
+    st.subheader("Strategies · NLP Sentiment")
+    st.write("TP guidé : avance étape par étape (choix dataset → filtres → stats → graphiques → aperçu).")
 
     datasets = {
         "Step4 · Sentiments": "strategies_nlp_trading/data/Step4_DataWithSentimentsResults.csv",
@@ -711,14 +729,78 @@ def render_strategies_nlp_sentiment():
         "Labelled News": "strategies_nlp_trading/data/LabelledNewsData.csv",
         "Correlation": "strategies_nlp_trading/data/correlation.csv",
     }
-    choice = st.selectbox("Fichier", list(datasets.keys()))
+
+    # Étape 1 : choix du dataset
+    st.markdown("### Étape 1/5 · Choisir un dataset")
+    choice = st.radio("Choisir le fichier (NLP)", list(datasets.keys()), key="nlp_ds_choice")
     path = datasets[choice]
+
     try:
         df_nlp = load_next_csv(path)
-        st.write(f"Shape : {df_nlp.shape}")
-        st.dataframe(df_nlp.head(), width="stretch")
     except Exception as exc:
         st.error(f"Lecture impossible ({exc})")
+        return
+
+    st.caption(f"Shape initiale : {df_nlp.shape}")
+
+    # Étape 2 : filtres (date + tickers)
+    st.markdown("### Étape 2/5 · Appliquer les filtres (dates, tickers)")
+    date_cols = [c for c in df_nlp.columns if "date" in c.lower()]
+    ticker_cols = [c for c in df_nlp.columns if c.lower() in {"ticker", "symbol"}]
+    sentiment_cols = [c for c in df_nlp.columns if "sentiment" in c.lower()]
+    return_cols = [c for c in df_nlp.columns if "return" in c.lower()]
+
+    if date_cols:
+        date_col = date_cols[0]
+        df_nlp[date_col] = pd.to_datetime(df_nlp[date_col], errors="coerce")
+        df_nlp = df_nlp.dropna(subset=[date_col])
+        min_d, max_d = df_nlp[date_col].min().date(), df_nlp[date_col].max().date()
+        start, end = st.date_input("Période", (min_d, max_d), min_value=min_d, max_value=max_d, key="nlp_date")
+        if start and end:
+            df_nlp = df_nlp[(df_nlp[date_col] >= pd.to_datetime(start)) & (df_nlp[date_col] <= pd.to_datetime(end))]
+
+    if ticker_cols:
+        tcol = ticker_cols[0]
+        uniq = sorted(df_nlp[tcol].dropna().unique().tolist())[:100]
+        selected = st.multiselect("Tickers/Symboles", uniq, default=uniq[:5], key="nlp_tickers")
+        if selected:
+            df_nlp = df_nlp[df_nlp[tcol].isin(selected)]
+
+    st.caption(f"Lignes après filtres : {len(df_nlp)}")
+
+    # Étape 3 : stats descriptives
+    st.markdown("### Étape 3/5 · Lire les statistiques clés")
+    if sentiment_cols:
+        scol = sentiment_cols[0]
+        if pd.api.types.is_numeric_dtype(df_nlp[scol]):
+            st.write(f"Moyenne sentiment : {df_nlp[scol].mean():.3f} | Médiane : {df_nlp[scol].median():.3f}")
+            fig, ax = plt.subplots(figsize=(6, 2.8))
+            ax.hist(df_nlp[scol].dropna(), bins=30, color="tab:blue", alpha=0.7)
+            ax.set_title(f"Distribution de {scol}")
+            st.pyplot(fig)
+        else:
+            counts = df_nlp[scol].value_counts().head(20)
+            st.bar_chart(counts)
+
+    # Étape 4 : graphiques (timeline sentiment + corrélation éventuelle)
+    st.markdown("### Étape 4/5 · Visualiser le signal (timeline, corrélation)")
+    if date_cols and sentiment_cols and pd.api.types.is_numeric_dtype(df_nlp[sentiment_cols[0]]):
+        scol = sentiment_cols[0]
+        date_col = date_cols[0]
+        daily = df_nlp.groupby(df_nlp[date_col].dt.date)[scol].mean()
+        st.line_chart(daily, height=200)
+
+    if sentiment_cols and return_cols:
+        scol = sentiment_cols[0]
+        rcol = return_cols[0]
+        num_df = df_nlp[[scol, rcol]].dropna()
+        if len(num_df) > 5:
+            corr = num_df.corr().iloc[0, 1]
+            st.metric("Corr(sentiment, return)", f"{corr:.3f}")
+
+    # Étape 5 : aperçu
+    st.markdown("### Étape 5/5 · Inspecter un extrait des données filtrées")
+    st.dataframe(df_nlp.head(200), width="stretch")
 
 
 def render_extra_nlp_overview():
