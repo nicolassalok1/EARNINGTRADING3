@@ -15,6 +15,7 @@ from scipy.optimize import minimize
 
 BASE_DIR = Path(__file__).parent
 TO_COPY = BASE_DIR / "to_copy"
+NEXT_DIR = BASE_DIR / "next"
 if str(TO_COPY) not in sys.path:
     sys.path.insert(0, str(TO_COPY))
 
@@ -47,6 +48,51 @@ def capture_logs(fn, *args, **kwargs):
 def load_raw_data():
     url = "https://certificate.tpq.io/rl4finance.csv"
     return pd.read_csv(url, index_col=0, parse_dates=True).dropna()
+
+
+@st.cache_data(show_spinner=False)
+def load_next_csv(name, parse_dates=None):
+    path = NEXT_DIR / name
+    if not path.exists():
+        raise FileNotFoundError(f"Fichier manquant : {path}")
+    return pd.read_csv(path, parse_dates=parse_dates)
+
+
+def train_test_split_series(series, train_ratio=0.8):
+    n_train = max(5, int(len(series) * train_ratio))
+    train = series.iloc[:n_train]
+    test = series.iloc[n_train:]
+    return train, test
+
+
+def polyfit_predict(series, deg=2):
+    x = np.arange(len(series))
+    coeffs = np.polyfit(x, series.values, deg=deg)
+    poly = np.poly1d(coeffs)
+    preds = poly(x)
+    next_pred = float(poly(len(series)))
+    return preds, next_pred
+
+
+def inverse_variance_weights(cov):
+    inv_var = 1 / np.clip(np.diag(cov), 1e-8, None)
+    w = inv_var / inv_var.sum()
+    return w
+
+
+def pca_svd(matrix, n_components=3):
+    matrix = matrix - matrix.mean(axis=0, keepdims=True)
+    U, s, Vt = np.linalg.svd(matrix, full_matrices=False)
+    comps = Vt[:n_components]
+    explained = (s ** 2) / (len(matrix) - 1)
+    explained_ratio = explained / explained.sum()
+    scores = np.dot(matrix, comps.T)
+    return comps, scores, explained_ratio
+
+
+def bsm_put_value(St, K, T, t, r, sigma):
+    call = bsm_call_value(St, K, T, t, r, sigma)
+    return call - St + K * math.exp(-r * (T - t))
 
 
 def plot_rewards(rewards, title):
@@ -278,6 +324,15 @@ tabs = st.tabs([
     "06 · Trading DQL",
     "07 · Hedging",
     "08 · Allocation 3AC",
+    "Next · Stock Pred",
+    "Next · Derivatives Pricing",
+    "Next · Derivatives Hedging",
+    "Next · BTC Strategy",
+    "Next · BTC PCA",
+    "Next · Portfolio Alloc",
+    "Next · Eigen Portfolio",
+    "Next · YC Build",
+    "Next · YC Predict",
 ])
 
 
@@ -455,3 +510,233 @@ with tabs[2]:
             ax.set_ylabel("PV")
             ax.grid(True, alpha=0.3)
             st.pyplot(fig)
+
+
+with tabs[3]:
+    st.subheader("Next · Stock Return Prediction")
+    st.write("Régression simple (polyfit) sur la série `data.csv`.")
+
+    df = load_next_csv("data.csv", parse_dates=["Date"])
+    df = df.set_index("Date")
+    feature = st.selectbox("Colonne cible", ["Close", "Adj Close", "Open", "High", "Low"])
+    degree = st.slider("Degré du polynôme", 1, 3, 2)
+    train_ratio = st.slider("Taille train (%)", 60, 95, 80, 1) / 100
+
+    series = df[feature].dropna()
+    train, test = train_test_split_series(series, train_ratio)
+    preds_train, next_pred = polyfit_predict(train, deg=degree)
+    x_all = np.arange(len(series))
+    poly = np.poly1d(np.polyfit(np.arange(len(train)), train.values, deg=degree))
+    preds_all = poly(x_all)
+    test_pred = preds_all[len(train):len(series)]
+    mae = float(np.mean(np.abs(test.values - test_pred))) if len(test) else float("nan")
+
+    st.metric("MAE (test)", f"{mae:.2f}")
+    st.metric("Prévision prochain point", f"{next_pred:.2f}")
+
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.plot(series.index, series.values, label="Réel", lw=1.5)
+    ax.plot(series.index[:len(train)], preds_train, label="Fit train", lw=1.2)
+    if len(test_pred):
+        ax.plot(series.index[len(train):], test_pred, label="Préd test", lw=1.2, linestyle="--")
+    ax.legend()
+    ax.set_title(f"Prédiction sur {feature}")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+
+
+with tabs[4]:
+    st.subheader("Next · Derivatives Pricing")
+    st.write("Prix BSM (call/put) et courbe en fonction du strike.")
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        S = st.number_input("Spot S", value=100.0, step=1.0)
+        K = st.number_input("Strike K", value=100.0, step=1.0)
+    with col_b:
+        T = st.number_input("Maturité (années)", value=1.0, step=0.25)
+        r = st.number_input("Taux r", value=0.01, format="%.4f")
+    with col_c:
+        sigma = st.number_input("Vol (sigma)", value=0.20, format="%.4f")
+        step_strikes = st.slider("Variation autour de K", 5, 50, 20, 5)
+
+    call = bsm_call_value(S, K, T, 0, r, sigma)
+    put = bsm_put_value(S, K, T, 0, r, sigma)
+    st.metric("Call BSM", f"{call:.4f}")
+    st.metric("Put BSM", f"{put:.4f}")
+
+    strikes = np.linspace(max(1, K - step_strikes), K + step_strikes, 25)
+    call_curve = [bsm_call_value(S, k, T, 0, r, sigma) for k in strikes]
+    put_curve = [bsm_put_value(S, k, T, 0, r, sigma) for k in strikes]
+    fig, ax = plt.subplots(figsize=(7, 3))
+    ax.plot(strikes, call_curve, label="Call", lw=1.4)
+    ax.plot(strikes, put_curve, label="Put", lw=1.4)
+    ax.set_xlabel("Strike")
+    ax.set_ylabel("Prix")
+    ax.set_title("Courbes de prix BSM")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    st.pyplot(fig)
+
+
+with tabs[5]:
+    st.subheader("Next · Derivatives Hedging")
+    st.write("Réplication delta avec GBM simulé (version rapide).")
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        S0_h = st.number_input("S0", value=100.0, step=1.0, key="dh_s0")
+        K_h = st.number_input("Strike", value=100.0, step=1.0, key="dh_k")
+    with col_b:
+        T_h = st.number_input("Maturité", value=1.0, step=0.25, key="dh_t")
+        r_h = st.number_input("Taux", value=0.01, format="%.4f", key="dh_r")
+    with col_c:
+        sigma_h = st.number_input("Vol", value=0.2, format="%.4f", key="dh_sigma")
+        steps_h = st.slider("Steps", 30, 300, 120, 10, key="dh_steps")
+    seed_dh = st.number_input("Seed", value=123, step=1, key="dh_seed")
+
+    if st.button("Simuler réplication (Next)"):
+        set_global_seed(seed_dh)
+        path = simulate_gbm(S0_h, T_h, r_h, sigma_h, steps_h)
+        rep = option_replication(path, K_h, T_h, r_h, sigma_h)
+        st.write(rep.head())
+        fig, ax = plt.subplots(figsize=(8, 3))
+        ax.plot(path, lw=1.1, label="Sous-jacent")
+        ax2 = ax.twinx()
+        ax2.plot(rep["C"].values, color="tab:red", label="Call", lw=1.1)
+        ax2.plot(rep["V"].values, color="tab:green", label="Portefeuille", lw=1.1, linestyle="--")
+        ax.set_title("Réplication delta")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper left")
+        ax2.legend(loc="upper right")
+        st.pyplot(fig)
+
+
+with tabs[6]:
+    st.subheader("Next · Bitcoin Trading Strategy")
+    st.write("Stratégie simple de croisement de moyennes mobiles sur `BitstampData.csv`.")
+
+    df_btc = load_next_csv("BitstampData.csv")
+    df_btc = df_btc.dropna()
+    df_btc["Date"] = pd.to_datetime(df_btc["Timestamp"], unit="s")
+    df_btc = df_btc.set_index("Date").sort_index()
+    short = st.slider("SMA courte", 3, 50, 10, 1)
+    long = st.slider("SMA longue", 10, 200, 50, 5)
+    df_btc["ret"] = df_btc["Close"].pct_change()
+    df_btc["sma_s"] = df_btc["Close"].rolling(short).mean()
+    df_btc["sma_l"] = df_btc["Close"].rolling(long).mean()
+    df_btc["signal"] = np.sign(df_btc["sma_s"] - df_btc["sma_l"])
+    df_btc["strat_ret"] = df_btc["signal"].shift(1) * df_btc["ret"]
+    perf = (1 + df_btc[["ret", "strat_ret"]].dropna()).cumprod()
+    st.metric("Perf stratégie (x)", f"{perf['strat_ret'].iloc[-1]:.3f}")
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.plot(perf.index, perf["ret"], label="Buy & Hold", lw=1.0)
+    ax.plot(perf.index, perf["strat_ret"], label="Stratégie SMA", lw=1.2)
+    ax.legend()
+    ax.set_title("Cumul des rendements")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+
+
+with tabs[7]:
+    st.subheader("Next · Bitcoin PCA (réduction de dimension)")
+    st.write("PCA rapide sur OHLCV pour visualiser les composantes principales.")
+
+    df_btc_pca = load_next_csv("BitstampData.csv")
+    df_btc_pca = df_btc_pca.dropna().copy()
+    df_btc_pca["Date"] = pd.to_datetime(df_btc_pca["Timestamp"], unit="s")
+    df_btc_pca = df_btc_pca.set_index("Date").sort_index()
+    feats = ["Open", "High", "Low", "Close", "Volume_(BTC)"]
+    X = df_btc_pca[feats].values
+    comps, scores, explained = pca_svd(X, n_components=3)
+    st.write("Variance expliquée", [f"{x:.2%}" for x in explained])
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.scatter(scores[:, 0], scores[:, 1], s=6, alpha=0.4)
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_title("Projection PCA (PC1 vs PC2)")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+
+
+with tabs[8]:
+    st.subheader("Next · Portfolio Allocation (crypto)")
+    st.write("Pondérations inverse-variance ou égalité sur `crypto_portfolio.csv`.")
+
+    df_crypto = load_next_csv("crypto_portfolio.csv", parse_dates=["Date"])
+    df_crypto = df_crypto.set_index("Date")
+    ret = df_crypto.pct_change().dropna()
+    method = st.radio("Méthode de pondération", ["Égal pondéré", "Inverse variance"])
+    cov = ret.cov()
+    if method == "Inverse variance":
+        w = inverse_variance_weights(cov.values)
+    else:
+        w = np.repeat(1 / ret.shape[1], ret.shape[1])
+    weights = pd.Series(w, index=ret.columns)
+    st.write("Pondérations", weights.round(4))
+    strat = (ret * weights).sum(axis=1)
+    perf = (1 + strat).cumprod()
+    fig, ax = plt.subplots(figsize=(7, 3))
+    ax.plot(perf.index, perf.values, lw=1.3, color="tab:purple")
+    ax.set_title("Valeur de portefeuille (base 1)")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+
+
+with tabs[9]:
+    st.subheader("Next · Eigen Portfolio (Dow 30)")
+    st.write("Première composante propre du covariance Dow_adjcloses.")
+
+    df_dow = load_next_csv("Dow_adjcloses.csv", parse_dates=["Date"]).set_index("Date")
+    ret = df_dow.pct_change().dropna()
+    cov = ret.cov()
+    vals, vecs = np.linalg.eigh(cov.values)
+    idx = vals.argsort()[::-1]
+    top_vec = vecs[:, idx[0]]
+    weights = top_vec / np.sum(np.abs(top_vec))
+    w_series = pd.Series(weights, index=ret.columns)
+    st.write("Pondérations (normalisées)", w_series.round(4).sort_values(ascending=False))
+    strat = (ret * w_series).sum(axis=1)
+    perf = (1 + strat).cumprod()
+    fig, ax = plt.subplots(figsize=(7, 3))
+    ax.plot(perf.index, perf.values, lw=1.2, color="tab:orange")
+    ax.set_title("Eigen-portfolio (PC1)")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
+
+
+with tabs[10]:
+    st.subheader("Next · Yield Curve Construction")
+    st.write("PCA sur courbe de swap (`DownloadedData.csv`).")
+
+    yc = load_next_csv("DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
+    comps, scores, explained = pca_svd(yc.values, n_components=3)
+    st.write("Variance expliquée", [f"{x:.2%}" for x in explained])
+    k = st.slider("Nombre de composantes pour reconstruction", 1, 3, 2)
+    recon = scores[:, :k] @ comps[:k]
+    recon += yc.values.mean(axis=0)
+    fig, ax = plt.subplots(figsize=(7, 3))
+    ax.plot(yc.columns, yc.iloc[-1].values, label="Dernière courbe", lw=1.4)
+    ax.plot(yc.columns, recon[-1], label=f"Reconstruction {k} PC", lw=1.2, linestyle="--")
+    ax.set_title("Courbe de swap")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    st.pyplot(fig)
+
+
+with tabs[11]:
+    st.subheader("Next · Yield Curve Prediction")
+    st.write("Projection d’un pas en avant par lissage exponentiel sur `DownloadedData.csv`.")
+
+    yc = load_next_csv("DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
+    alpha = st.slider("Facteur de lissage", 0.01, 0.99, 0.2, 0.01)
+    forecast = yc.ewm(alpha=alpha).mean().iloc[-1]
+    st.write("Prévision prochaine courbe")
+    st.dataframe(forecast.to_frame("Prévision").T, use_container_width=True)
+    fig, ax = plt.subplots(figsize=(7, 3))
+    ax.plot(yc.columns, yc.iloc[-1].values, label="Dernière observation", lw=1.2)
+    ax.plot(yc.columns, forecast.values, label="Prévision", lw=1.2, linestyle="--")
+    ax.set_title("Prévision courte échéance")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    st.pyplot(fig)
