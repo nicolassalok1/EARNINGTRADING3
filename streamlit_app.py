@@ -14,10 +14,20 @@ from scipy import stats
 from scipy.optimize import minimize
 
 BASE_DIR = Path(__file__).parent
-TO_COPY = BASE_DIR / "to_copy"
-NEXT_DIR = BASE_DIR / "next"
-if str(TO_COPY) not in sys.path:
-    sys.path.insert(0, str(TO_COPY))
+SOURCES_DIR = BASE_DIR / "sources"
+RL4F_BASE = SOURCES_DIR / "rl4f"
+RL4F_DIRS = [
+    RL4F_BASE / "trading_dql",
+    RL4F_BASE / "hedging_dql",
+    RL4F_BASE / "allocation_3ac",
+]
+NEXT_DATA_DIRS = sorted(
+    [path for path in SOURCES_DIR.rglob("data") if path.is_dir()],
+    key=lambda p: str(p),
+)
+for path in RL4F_DIRS:
+    if path.exists() and str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from finance import Finance
 from dqlagent_pytorch import DQLAgent, device
@@ -52,9 +62,19 @@ def load_raw_data():
 
 @st.cache_data(show_spinner=False)
 def load_next_csv(name, parse_dates=None):
-    path = NEXT_DIR / name
-    if not path.exists():
-        raise FileNotFoundError(f"Fichier manquant : {path}")
+    candidates = []
+    for data_dir in NEXT_DATA_DIRS:
+        candidate = data_dir / name
+        if candidate.exists():
+            candidates.append(candidate)
+    fallback = SOURCES_DIR / name
+    if fallback.exists():
+        candidates.append(fallback)
+    if not candidates:
+        raise FileNotFoundError(
+            f"Fichier manquant : {name} (cherché dans {SOURCES_DIR})"
+        )
+    path = candidates[0]
     return pd.read_csv(path, parse_dates=parse_dates)
 
 
@@ -516,7 +536,7 @@ with tabs[3]:
     st.subheader("Next · Stock Return Prediction")
     st.write("Régression simple (polyfit) sur la série `data.csv`.")
 
-    df = load_next_csv("data.csv", parse_dates=["Date"])
+    df = load_next_csv("stock_return_prediction/data/data.csv", parse_dates=["Date"])
     df = df.set_index("Date")
     feature = st.selectbox("Colonne cible", ["Close", "Adj Close", "Open", "High", "Low"])
     degree = st.slider("Degré du polynôme", 1, 3, 2)
@@ -616,7 +636,7 @@ with tabs[6]:
     st.subheader("Next · Bitcoin Trading Strategy")
     st.write("Stratégie simple de croisement de moyennes mobiles sur `BitstampData.csv`.")
 
-    df_btc = load_next_csv("BitstampData.csv")
+    df_btc = load_next_csv("bitcoin_trading_strategy/data/BitstampData.csv")
     df_btc = df_btc.dropna()
     df_btc["Date"] = pd.to_datetime(df_btc["Timestamp"], unit="s")
     df_btc = df_btc.set_index("Date").sort_index()
@@ -642,7 +662,7 @@ with tabs[7]:
     st.subheader("Next · Bitcoin PCA (réduction de dimension)")
     st.write("PCA rapide sur OHLCV pour visualiser les composantes principales.")
 
-    df_btc_pca = load_next_csv("BitstampData.csv")
+    df_btc_pca = load_next_csv("bitcoin_trading_ml/data/BitstampData.csv")
     df_btc_pca = df_btc_pca.dropna().copy()
     df_btc_pca["Date"] = pd.to_datetime(df_btc_pca["Timestamp"], unit="s")
     df_btc_pca = df_btc_pca.set_index("Date").sort_index()
@@ -663,7 +683,7 @@ with tabs[8]:
     st.subheader("Next · Portfolio Allocation (crypto)")
     st.write("Pondérations inverse-variance ou égalité sur `crypto_portfolio.csv`.")
 
-    df_crypto = load_next_csv("crypto_portfolio.csv", parse_dates=["Date"])
+    df_crypto = load_next_csv("portfolio_allocation/data/crypto_portfolio.csv", parse_dates=["Date"])
     df_crypto = df_crypto.set_index("Date")
     ret = df_crypto.pct_change().dropna()
     method = st.radio("Méthode de pondération", ["Égal pondéré", "Inverse variance"])
@@ -687,7 +707,7 @@ with tabs[9]:
     st.subheader("Next · Eigen Portfolio (Dow 30)")
     st.write("Première composante propre du covariance Dow_adjcloses.")
 
-    df_dow = load_next_csv("Dow_adjcloses.csv", parse_dates=["Date"]).set_index("Date")
+    df_dow = load_next_csv("portfolio_eigen/data/Dow_adjcloses.csv", parse_dates=["Date"]).set_index("Date")
     ret = df_dow.pct_change().dropna()
     cov = ret.cov()
     vals, vecs = np.linalg.eigh(cov.values)
@@ -709,7 +729,7 @@ with tabs[10]:
     st.subheader("Next · Yield Curve Construction")
     st.write("PCA sur courbe de swap (`DownloadedData.csv`).")
 
-    yc = load_next_csv("DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
+    yc = load_next_csv("yield_curve_construction/data/DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
     comps, scores, explained = pca_svd(yc.values, n_components=3)
     st.write("Variance expliquée", [f"{x:.2%}" for x in explained])
     k = st.slider("Nombre de composantes pour reconstruction", 1, 3, 2)
@@ -728,7 +748,7 @@ with tabs[11]:
     st.subheader("Next · Yield Curve Prediction")
     st.write("Projection d’un pas en avant par lissage exponentiel sur `DownloadedData.csv`.")
 
-    yc = load_next_csv("DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
+    yc = load_next_csv("yield_curve_prediction/data/DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
     alpha = st.slider("Facteur de lissage", 0.01, 0.99, 0.2, 0.01)
     forecast = yc.ewm(alpha=alpha).mean().iloc[-1]
     st.write("Prévision prochaine courbe")

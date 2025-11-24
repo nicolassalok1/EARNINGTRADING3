@@ -3,4 +3,17 @@ matplotlib
 pandas
 numpy
 scipy
+torch
+scikit-learn
+seaborn
+statsmodels
+pandas-datareader
+yfinance
+fredapi
+ipywidgets
+IPython
+tensorflow
+keras
+scikeras
+quandl
 ibapi
