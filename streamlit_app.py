@@ -335,206 +335,99 @@ class HedgingAgent(DQLAgent):
                     break
 
 
-# ---------- Tabs ----------
-st.set_page_config(page_title="RL4F Notebooks en Streamlit", layout="wide")
-st.title("RL4F : trois notebooks regroupés")
-st.caption("Chaque onglet reflète un notebook (06, 07, 08) avec des paramètres ajustables.")
+# ---------- UI renderers ----------
+def render_rl_trading():
+    st.subheader("RL · Trading (DQL)")
+    st.write("Aperçu des données utilisées par l’agent de trading.")
+    df = load_raw_data()
+    col = st.selectbox("Colonne à tracer", list(df.columns), key="rl_trading_col")
+    horizon = st.slider(
+        "Fenêtre (jours)",
+        50,
+        min(500, len(df)),
+        min(200, len(df)),
+        25,
+        key="rl_trading_window",
+    )
+    series = df[col].tail(horizon)
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.plot(series.index, series.values, lw=1.2, color="tab:blue")
+    ax.set_title(f"{col} — derniers {len(series)} points")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig)
 
-tabs = st.tabs([
-    "Agents RL · Trading DQL",
-    "Agents RL · Hedging",
-    "Agents RL · Allocation 3AC",
-    "Pricing · Derivatives",
-    "Hedging · Derivatives",
-    "Signals · Stock Prediction",
-    "Signals · BTC PCA",
-    "Signals · Eigen Portfolio",
-    "Signals · Yield Curve Build",
-    "Signals · Yield Curve Predict",
-    "Strategies · BTC MA",
-    "Strategies · Crypto Allocation",
-    "Strategies · RL SP500",
-    "Strategies · NLP Sentiment",
-])
 
+def render_rl_hedging():
+    st.subheader("RL · Hedging (environnement)")
+    st.write("Simulation rapide d’un épisode aléatoire de couverture delta.")
 
-with tabs[0]:
-    st.subheader("Notebook 06 — Agent DQL sur données historiques")
-    st.write("Entraînement rapide d’un agent DQL sur la série `rl4finance.csv` "
-             "via l’environnement `Finance`.")
-
-    data = load_raw_data()
-    symbols = sorted(data.columns)
-    col_a, col_b, col_c = st.columns([1.5, 1, 1])
+    col_a, col_b, col_c = st.columns(3)
     with col_a:
-        symbol = st.selectbox("Symbole", symbols, index=0)
+        S0 = st.number_input("S0", value=100.0, step=1.0, key="rlh_s0")
+        K = st.number_input("Strike", value=100.0, step=1.0, key="rlh_k")
     with col_b:
-        n_features = st.slider("Fenêtre (lags)", 4, 30, 8, 1)
-        min_acc = st.slider("Seuil d'exactitude", 0.0, 1.0, 0.50, 0.01)
+        T = st.number_input("Maturité (années)", value=1.0, step=0.25, key="rlh_t")
+        r = st.number_input("Taux r", value=0.01, format="%.4f", key="rlh_r")
     with col_c:
-        episodes = st.slider("Episodes d'entraînement", 1, 200, 20, 1)
-        test_episodes = st.slider("Episodes de test", 1, 50, 5, 1)
-    seed = st.number_input("Seed", value=100, step=1)
-    lr = st.number_input("Learning rate", value=0.0005, format="%.6f")
+        sigma = st.number_input("Vol (sigma)", value=0.2, format="%.4f", key="rlh_sigma")
+        steps = st.slider("Steps", 20, 200, 80, 10, key="rlh_steps")
+    seed = st.number_input("Seed", value=123, step=1, key="rlh_seed")
 
-    st.dataframe(data[[symbol]].head(), width="stretch")
-
-    if st.button("Lancer l'entraînement Trading"):
+    if st.button("Lancer un épisode", key="rlh_run"):
         set_global_seed(seed)
-        finance = Finance(symbol, "r", min_accuracy=min_acc,
-                          n_features=n_features)
-        agent = DQLAgent(finance.symbol, finance.feature,
-                         finance.n_features, finance, lr=lr)
-        with st.spinner("Entraînement en cours..."):
-            train_logs, _ = capture_logs(agent.learn, episodes)
-        finance.min_accuracy = 0.0
-        with st.spinner("Tests..."):
-            test_logs, _ = capture_logs(agent.test, test_episodes,
-                                        min_accuracy=0.0,
-                                        min_performance=0.0,
-                                        verbose=False, full=False)
-        st.success("Terminé.")
-        st.text_area("Journal (entrainement + test)",
-                     (train_logs + test_logs)[-4000:], height=180, width="stretch")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Episodes vus", len(agent.trewards))
-        with col2:
-            st.metric("Max reward", f"{agent.max_treward:.2f}")
-        with col3:
-            st.metric("Epsilon final", f"{agent.epsilon:.3f}")
-
-        if agent.trewards:
-            fig = plot_rewards(agent.trewards,
-                               "Récompense cumulée par épisode")
-            st.pyplot(fig)
-
-
-with tabs[1]:
-    st.subheader("Notebook 07 — Hedging (delta et DQL)")
-    st.write("Simulation GBM + réplication delta et agent DQL pour ajuster la couverture.")
-
-    col_a, col_b, col_c, col_d = st.columns(4)
-    with col_a:
-        S0 = st.number_input("S0", value=100.0, step=1.0)
-        T = st.number_input("Maturité (années)", value=1.0, step=0.25, key="bsm_maturity")
-    with col_b:
-        K = st.number_input("Strike K", value=100.0, step=5.0)
-        steps = st.slider("Pas de temps", 50, 400, 252, 10)
-    with col_c:
-        r = st.number_input("Taux r", value=0.05, format="%.4f")
-        sigma = st.number_input("Vol (sigma)", value=0.20, format="%.4f", key="hedging_sigma")
-    with col_d:
-        seed_h = st.number_input("Seed hedging", value=750, step=1)
-        episodes_h = st.slider("Episodes DQL", 1, 100, 10, 1)
-        test_h = st.slider("Episodes test", 1, 50, 5, 1)
-
-    st.markdown("**Réplication delta BSM**")
-    if st.button("Simuler réplication delta"):
-        set_global_seed(seed_h)
-        path = simulate_gbm(S0, T, r, sigma, steps)
-        rep = option_replication(path, K, T, r, sigma)
-        st.write(rep.head())
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-        ax1.plot(path, lw=1.2, color="tab:blue")
-        ax1.set_title("Trajectoire simulée")
-        ax1.set_xlabel("Pas")
-        ax1.set_ylabel("Prix")
-        if not rep.empty:
-            ax2.plot(rep["C"].values, label="Call", lw=1.1)
-            ax2.plot(rep["V"].values, label="Portefeuille", lw=1.1)
-            ax2.set_title("Call vs portefeuille répliquant")
-            ax2.legend()
-        ax1.grid(True, alpha=0.3)
-        ax2.grid(True, alpha=0.3)
+        env = Hedging(S0=S0, K_=[K], T=T, r_=[r], sigma_=[sigma], steps=steps)
+        env.seed(seed)
+        state, _ = env.reset()
+        for _ in range(env.steps):
+            action = env.action_space.sample()
+            state, reward, done, _, _ = env.step(action)
+            if done:
+                break
+        st.write(env.portfolios.tail())
+        fig, ax = plt.subplots(figsize=(8, 3))
+        ax.plot(env.data["index"].values, lw=1.1, label="Sous-jacent")
+        if not env.portfolios.empty:
+            ax2 = ax.twinx()
+            ax2.plot(env.portfolios["C"].values, color="tab:red", lw=1.0, label="Call")
+            ax2.plot(env.portfolios["phi"].values, color="tab:green", lw=1.0, linestyle="--", label="Portefeuille")
+            ax2.legend(loc="upper right")
+        ax.set_title("Trajectoire simulée (env RL hedging)")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="upper left")
         st.pyplot(fig)
 
-    st.markdown("**Agent de couverture DQL**")
-    lr_h = st.number_input("Learning rate (hedging)", value=0.001, format="%.6f")
-    hu_h = st.slider("Hidden units", 8, 256, 128, 8)
-    if st.button("Entraîner l'agent Hedging"):
-        set_global_seed(seed_h)
-        Ks = np.array([0.9, 0.95, 1.0, 1.05, 1.10]) * K
-        rs = [0, r / 2, r]
-        sigmas = [max(sigma / 2, 1e-4), sigma, sigma * 1.5]
-        env = Hedging(S0=S0, K_=Ks, T=T, r_=rs, sigma_=sigmas, steps=steps)
-        agent = HedgingAgent("SYM", feature=None, n_features=8,
-                             env=env, hu=hu_h, lr=lr_h)
-        with st.spinner("Entraînement..."):
-            train_logs, _ = capture_logs(agent.learn, episodes_h)
-        env.portfolios = pd.DataFrame()
-        with st.spinner("Tests..."):
-            test_logs, _ = capture_logs(agent.test, test_h, verbose=False)
-        st.success("Terminé.")
-        st.text_area("Journal hedging", (train_logs + test_logs)[-4000:],
-                     height=160)
-        st.metric("Epsilon final", f"{agent.epsilon:.3f}")
-        if not env.portfolios.empty:
-            last_ep = env.portfolios["e"].max()
-            sample = env.portfolios[env.portfolios["e"] == last_ep]
-            st.write("P&L échantillon (dernier épisode)")
-            st.dataframe(sample[["p&l[$]", "p&l[%]", "St", "C"]].head(),
-                         width="stretch")
-            fig = plot_rewards(agent.trewards, "Pénalité cumulée")
-            st.pyplot(fig)
+
+def render_rl_allocation():
+    st.subheader("RL · Allocation (crypto 3 actifs)")
+    st.write("Aperçu des pondérations inverse-variance sur le dataset crypto.")
+    try:
+        df_crypto = load_next_csv("portfolio_allocation/data/crypto_portfolio.csv", parse_dates=["Date"])
+        df_crypto = df_crypto.set_index("Date")
+        ret = df_crypto.pct_change().dropna()
+        method = st.radio(
+            "Méthode de pondération",
+            ["Égal pondéré", "Inverse variance"],
+            key="rl_alloc_method",
+        )
+        cov = ret.cov()
+        if method == "Inverse variance":
+            w = inverse_variance_weights(cov.values)
+        else:
+            w = np.repeat(1 / ret.shape[1], ret.shape[1])
+        weights = pd.Series(w, index=ret.columns)
+        st.write("Pondérations", weights.round(4))
+        strat = (ret * weights).sum(axis=1)
+        perf = (1 + strat).cumprod()
+        fig, ax = plt.subplots(figsize=(7, 3))
+        ax.plot(perf.index, perf.values, lw=1.3, color="tab:purple")
+        ax.set_title("Valeur de portefeuille (base 1)")
+        ax.grid(True, alpha=0.3)
+        st.pyplot(fig)
+    except Exception as exc:
+        st.error(f"Lecture impossible ({exc})")
 
 
-with tabs[2]:
-    st.subheader("Notebook 08 — Allocation à trois actifs (InvestingAgent)")
-    st.write("Réplique l’agent d’allocation 3AC avec un entraînement court.")
-
-    df = load_raw_data()
-    symbols = sorted(df.columns)
-    col_a, col_b, col_c, col_d = st.columns(4)
-    with col_a:
-        asset_x = st.selectbox("Actif X", symbols, index=0)
-    with col_b:
-        asset_y = st.selectbox("Actif Y", symbols, index=1)
-    with col_c:
-        asset_z = st.selectbox("Actif Z", symbols, index=2)
-    with col_d:
-        steps_inv = st.slider("Pas (jours)", 50, 400, 252, 10)
-        seed_inv = st.number_input("Seed allocation", value=100, step=1)
-    episodes_inv = st.slider("Episodes entraînement", 1, 100, 10, 1)
-    test_inv = st.slider("Episodes test", 1, 50, 10, 1)
-    lr_inv = st.number_input("Learning rate allocation", value=0.00025,
-                             format="%.6f")
-    hu_inv = st.slider("Hidden units allocation", 8, 256, 128, 8)
-
-    st.dataframe(df[[asset_x, asset_y, asset_z]].head(),
-                 width="stretch")
-
-    if st.button("Lancer l'agent d'allocation"):
-        set_global_seed(seed_inv)
-        investing = Investing(asset_x, asset_y, asset_z,
-                              steps=steps_inv, amount=1)
-        agent = InvestingAgent("3AC", feature=None, n_features=6,
-                               env=investing, hu=hu_inv, lr=lr_inv)
-        with st.spinner("Entraînement allocation..."):
-            train_logs, _ = capture_logs(agent.learn, episodes_inv)
-        investing.portfolios = pd.DataFrame()
-        with st.spinner("Tests allocation..."):
-            test_logs, _ = capture_logs(agent.test, test_inv, verbose=False)
-        st.success("Terminé.")
-        st.text_area("Journal allocation", (train_logs + test_logs)[-4000:],
-                     height=160, width="stretch")
-        if not investing.portfolios.empty:
-            last_ep = investing.portfolios["e"].max()
-            sample = investing.portfolios[investing.portfolios["e"] == last_ep]
-            alloc_cols = ["xt", "yt", "zt", "pv"]
-            st.write("Trajectoire (dernier épisode)")
-            st.dataframe(sample[alloc_cols].head(), width="stretch")
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.plot(sample["pv"].values, lw=1.4, color="tab:green")
-            ax.set_title("Valeur de portefeuille")
-            ax.set_xlabel("Pas")
-            ax.set_ylabel("PV")
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
-
-
-with tabs[3]:
+def render_pricing_derivatives():
     st.subheader("Pricing · Derivatives")
     st.write("Prix BSM (call/put) et courbe en fonction du strike.")
 
@@ -568,7 +461,7 @@ with tabs[3]:
     st.pyplot(fig)
 
 
-with tabs[4]:
+def render_hedging_derivatives():
     st.subheader("Hedging · Derivatives")
     st.write("Réplication delta avec GBM simulé (version rapide).")
 
@@ -584,7 +477,7 @@ with tabs[4]:
         steps_h = st.slider("Steps", 30, 300, 120, 10, key="dh_steps")
     seed_dh = st.number_input("Seed", value=123, step=1, key="dh_seed")
 
-    if st.button("Simuler réplication (Next)"):
+    if st.button("Simuler réplication", key="dh_run"):
         set_global_seed(seed_dh)
         path = simulate_gbm(S0_h, T_h, r_h, sigma_h, steps_h)
         rep = option_replication(path, K_h, T_h, r_h, sigma_h)
@@ -601,7 +494,7 @@ with tabs[4]:
         st.pyplot(fig)
 
 
-with tabs[5]:
+def render_signals_stock_prediction():
     st.subheader("Signals · Stock Return Prediction")
     st.write("Régression simple (polyfit) sur la série `data.csv`.")
 
@@ -634,7 +527,7 @@ with tabs[5]:
     st.pyplot(fig)
 
 
-with tabs[6]:
+def render_signals_btc_pca():
     st.subheader("Signals · BTC PCA (réduction de dimension)")
     st.write("PCA rapide sur OHLCV pour visualiser les composantes principales.")
 
@@ -655,11 +548,16 @@ with tabs[6]:
     st.pyplot(fig)
 
 
-with tabs[7]:
+def render_signals_eigen_portfolio():
     st.subheader("Signals · Eigen Portfolio (Dow 30)")
     st.write("Première composante propre du covariance Dow_adjcloses.")
 
-    df_dow = load_next_csv("Dow_adjcloses.csv", parse_dates=["Date"]).set_index("Date")
+    datasets = {
+        "Dataset principal": "Dow_adjcloses.csv",
+        "Dataset Next": "portfolio_eigen/data/Dow_adjcloses.csv",
+    }
+    choice = st.selectbox("Jeu de données", list(datasets.keys()), key="signals_eigen_dataset")
+    df_dow = load_next_csv(datasets[choice], parse_dates=["Date"]).set_index("Date")
     ret = df_dow.pct_change().dropna()
     cov = ret.cov()
     vals, vecs = np.linalg.eigh(cov.values)
@@ -677,11 +575,16 @@ with tabs[7]:
     st.pyplot(fig)
 
 
-with tabs[8]:
+def render_signals_yield_curve_construction():
     st.subheader("Signals · Yield Curve Construction")
     st.write("PCA sur courbe de swap (`DownloadedData.csv`).")
 
-    yc = load_next_csv("DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
+    datasets = {
+        "Dataset principal": "DownloadedData.csv",
+        "Dataset Next": "yield_curve_construction/data/DownloadedData.csv",
+    }
+    choice = st.selectbox("Jeu de données", list(datasets.keys()), key="yc_build_dataset")
+    yc = load_next_csv(datasets[choice], parse_dates=["DATE"]).set_index("DATE")
     comps, scores, explained = pca_svd(yc.values, n_components=3)
     st.write("Variance expliquée", [f"{x:.2%}" for x in explained])
     k = st.slider("Nombre de composantes pour reconstruction", 1, 3, 2, key="yc_build_components")
@@ -696,12 +599,17 @@ with tabs[8]:
     st.pyplot(fig)
 
 
-with tabs[9]:
+def render_signals_yield_curve_prediction():
     st.subheader("Signals · Yield Curve Prediction")
-    st.write("Projection d’un pas en avant par lissage exponentiel sur `DownloadedData.csv`.")
+    st.write("Projection d’un pas en avant par lissage exponentiel.")
 
-    yc = load_next_csv("DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
-    alpha = st.slider("Facteur de lissage", 0.01, 0.99, 0.2, 0.01, key="yc_build_alpha")
+    datasets = {
+        "Dataset principal": "DownloadedData.csv",
+        "Dataset Next": "yield_curve_prediction/data/DownloadedData.csv",
+    }
+    choice = st.selectbox("Jeu de données", list(datasets.keys()), key="yc_predict_dataset")
+    yc = load_next_csv(datasets[choice], parse_dates=["DATE"]).set_index("DATE")
+    alpha = st.slider("Facteur de lissage", 0.01, 0.99, 0.2, 0.01, key="yc_predict_alpha")
     forecast = yc.ewm(alpha=alpha).mean().iloc[-1]
     st.write("Prévision prochaine courbe")
     st.dataframe(forecast.to_frame("Prévision").T, width="stretch")
@@ -714,7 +622,7 @@ with tabs[9]:
     st.pyplot(fig)
 
 
-with tabs[10]:
+def render_strategies_btc_ma():
     st.subheader("Strategies · Bitcoin MA Crossover")
     st.write("Stratégie simple de croisement de moyennes mobiles sur `BitstampData.csv`.")
 
@@ -740,73 +648,16 @@ with tabs[10]:
     st.pyplot(fig)
 
 
-with tabs[11]:
+def render_strategies_crypto_allocation():
     st.subheader("Strategies · Crypto Allocation")
-    st.write("Pondérations inverse-variance ou égalité sur `crypto_portfolio.csv`.")
-
-    df_crypto = load_next_csv("crypto_portfolio.csv", parse_dates=["Date"])
-    df_crypto = df_crypto.set_index("Date")
-    ret = df_crypto.pct_change().dropna()
-    method = st.radio("Méthode de pondération", ["Égal pondéré", "Inverse variance"], key="signals_weight_method")
-    cov = ret.cov()
-    if method == "Inverse variance":
-        w = inverse_variance_weights(cov.values)
-    else:
-        w = np.repeat(1 / ret.shape[1], ret.shape[1])
-    weights = pd.Series(w, index=ret.columns)
-    st.write("Pondérations", weights.round(4))
-    strat = (ret * weights).sum(axis=1)
-    perf = (1 + strat).cumprod()
-    fig, ax = plt.subplots(figsize=(7, 3))
-    ax.plot(perf.index, perf.values, lw=1.3, color="tab:purple")
-    ax.set_title("Valeur de portefeuille (base 1)")
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
-
-
-with tabs[12]:
-    st.subheader("Strategies · RL SP500 (aperçu data)")
-    st.write("Jeu de données S&P500 utilisé dans le notebook RL.")
-
-    df_sp = load_next_csv("reinforcement_trading_strategy/data/SP500.csv", parse_dates=["Date"])
-    df_sp = df_sp.set_index("Date")
-    horizon = st.slider("Fenêtre (jours)", 50, min(500, len(df_sp)), min(200, len(df_sp)), 50)
-    sample_sp = df_sp.tail(horizon)
-    st.dataframe(sample_sp.head(), width="stretch")
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.plot(sample_sp.index, sample_sp["Close"], lw=1.2, color="tab:blue")
-    ax.set_title(f"S&P500 — Close (derniers {horizon} jours)")
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
-
-
-with tabs[13]:
-    st.subheader("Strategies · NLP Sentiment (données)")
-    st.write("Jeu de données texte/sentiment utilisé dans le notebook NLP.")
+    st.write("Pondérations inverse-variance ou égalité.")
 
     datasets = {
-        "Step4 · Sentiments": "strategies_nlp_trading/data/Step4_DataWithSentimentsResults.csv",
-        "Step3 · News + Return": "strategies_nlp_trading/data/Step3_NewsAndReturnData.csv",
-        "Step2.2 · Return": "strategies_nlp_trading/data/Step2.2_ReturnData.csv",
-        "Lexicon": "strategies_nlp_trading/data/LexiconData.csv",
-        "Labelled News": "strategies_nlp_trading/data/LabelledNewsData.csv",
-        "Correlation": "strategies_nlp_trading/data/correlation.csv",
+        "Dataset principal": "crypto_portfolio.csv",
+        "Dataset Next": "portfolio_allocation/data/crypto_portfolio.csv",
     }
-    choice = st.selectbox("Fichier", list(datasets.keys()))
-    path = datasets[choice]
-    try:
-        df_nlp = load_next_csv(path)
-        st.write(f"Shape : {df_nlp.shape}")
-        st.dataframe(df_nlp.head(), width="stretch")
-    except Exception as e:
-        st.error(f"Lecture impossible ({e})")
-
-
-with tabs[8]:
-    st.subheader("Next · Portfolio Allocation (crypto)")
-    st.write("Pondérations inverse-variance ou égalité sur `crypto_portfolio.csv`.")
-
-    df_crypto = load_next_csv("portfolio_allocation/data/crypto_portfolio.csv", parse_dates=["Date"])
+    choice = st.selectbox("Jeu de données", list(datasets.keys()), key="strategies_alloc_dataset")
+    df_crypto = load_next_csv(datasets[choice], parse_dates=["Date"])
     df_crypto = df_crypto.set_index("Date")
     ret = df_crypto.pct_change().dropna()
     method = st.radio("Méthode de pondération", ["Égal pondéré", "Inverse variance"], key="strategies_alloc_method")
@@ -826,60 +677,113 @@ with tabs[8]:
     st.pyplot(fig)
 
 
-with tabs[9]:
-    st.subheader("Next · Eigen Portfolio (Dow 30)")
-    st.write("Première composante propre du covariance Dow_adjcloses.")
+def render_strategies_rl_sp500():
+    st.subheader("Strategies · RL SP500 (aperçu data)")
+    st.write("Jeu de données S&P500 utilisé dans le notebook RL.")
 
-    df_dow = load_next_csv("portfolio_eigen/data/Dow_adjcloses.csv", parse_dates=["Date"]).set_index("Date")
-    ret = df_dow.pct_change().dropna()
-    cov = ret.cov()
-    vals, vecs = np.linalg.eigh(cov.values)
-    idx = vals.argsort()[::-1]
-    top_vec = vecs[:, idx[0]]
-    weights = top_vec / np.sum(np.abs(top_vec))
-    w_series = pd.Series(weights, index=ret.columns)
-    st.write("Pondérations (normalisées)", w_series.round(4).sort_values(ascending=False))
-    strat = (ret * w_series).sum(axis=1)
-    perf = (1 + strat).cumprod()
-    fig, ax = plt.subplots(figsize=(7, 3))
-    ax.plot(perf.index, perf.values, lw=1.2, color="tab:orange")
-    ax.set_title("Eigen-portfolio (PC1)")
+    df_sp = load_next_csv("reinforcement_trading_strategy/data/SP500.csv", parse_dates=["Date"])
+    df_sp = df_sp.set_index("Date")
+    horizon = st.slider("Fenêtre (jours)", 50, min(500, len(df_sp)), min(200, len(df_sp)), 50)
+    sample_sp = df_sp.tail(horizon)
+    st.dataframe(sample_sp.head(), width="stretch")
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.plot(sample_sp.index, sample_sp["Close"], lw=1.2, color="tab:blue")
+    ax.set_title(f"S&P500 — Close (derniers {horizon} jours)")
     ax.grid(True, alpha=0.3)
     st.pyplot(fig)
 
 
-with tabs[10]:
-    st.subheader("Next · Yield Curve Construction")
-    st.write("PCA sur courbe de swap (`DownloadedData.csv`).")
+def render_strategies_nlp_sentiment():
+    st.subheader("Strategies · NLP Sentiment (données)")
+    st.write("Jeu de données texte/sentiment utilisé dans le notebook NLP.")
 
-    yc = load_next_csv("yield_curve_construction/data/DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
-    comps, scores, explained = pca_svd(yc.values, n_components=3)
-    st.write("Variance expliquée", [f"{x:.2%}" for x in explained])
-    k = st.slider("Nombre de composantes pour reconstruction", 1, 3, 2, key="yc_predict_components")
-    recon = scores[:, :k] @ comps[:k]
-    recon += yc.values.mean(axis=0)
-    fig, ax = plt.subplots(figsize=(7, 3))
-    ax.plot(yc.columns, yc.iloc[-1].values, label="Dernière courbe", lw=1.4)
-    ax.plot(yc.columns, recon[-1], label=f"Reconstruction {k} PC", lw=1.2, linestyle="--")
-    ax.set_title("Courbe de swap")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    st.pyplot(fig)
+    datasets = {
+        "Step4 · Sentiments": "strategies_nlp_trading/data/Step4_DataWithSentimentsResults.csv",
+        "Step3 · News + Return": "strategies_nlp_trading/data/Step3_NewsAndReturnData.csv",
+        "Step2.2 · Return": "strategies_nlp_trading/data/Step2.2_ReturnData.csv",
+        "Lexicon": "strategies_nlp_trading/data/LexiconData.csv",
+        "Labelled News": "strategies_nlp_trading/data/LabelledNewsData.csv",
+        "Correlation": "strategies_nlp_trading/data/correlation.csv",
+    }
+    choice = st.selectbox("Fichier", list(datasets.keys()))
+    path = datasets[choice]
+    try:
+        df_nlp = load_next_csv(path)
+        st.write(f"Shape : {df_nlp.shape}")
+        st.dataframe(df_nlp.head(), width="stretch")
+    except Exception as exc:
+        st.error(f"Lecture impossible ({exc})")
 
 
-with tabs[11]:
-    st.subheader("Next · Yield Curve Prediction")
-    st.write("Projection d’un pas en avant par lissage exponentiel sur `DownloadedData.csv`.")
+def render_extra_nlp_notebook():
+    st.subheader("Extras · Notebook NLP")
+    notebook_path = SOURCES_DIR / "extra_nlp" / "nlp.ipynb"
+    if notebook_path.exists():
+        st.write("Notebook importé depuis `to_merge/nlp.ipynb`.")
+        st.code(str(notebook_path))
+        st.write(f"Taille : {notebook_path.stat().st_size / 1024:.1f} Ko")
+    else:
+        st.error("Notebook NLP manquant.")
 
-    yc = load_next_csv("yield_curve_prediction/data/DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
-    alpha = st.slider("Facteur de lissage", 0.01, 0.99, 0.2, 0.01, key="yc_predict_alpha")
-    forecast = yc.ewm(alpha=alpha).mean().iloc[-1]
-    st.write("Prévision prochaine courbe")
-    st.dataframe(forecast.to_frame("Prévision").T, width="stretch")
-    fig, ax = plt.subplots(figsize=(7, 3))
-    ax.plot(yc.columns, yc.iloc[-1].values, label="Dernière observation", lw=1.2)
-    ax.plot(yc.columns, forecast.values, label="Prévision", lw=1.2, linestyle="--")
-    ax.set_title("Prévision courte échéance")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    st.pyplot(fig)
+
+def main():
+    st.set_page_config(page_title="RL & Finance Lab", layout="wide")
+    st.title("RL & Quant Finance Lab")
+    st.caption("Onglets restructurés par famille : Agents RL / Pricing & Hedging / Signals / Strategies / Extras.")
+
+    tabs_main = st.tabs(["Agents RL", "Pricing & Hedging", "Signals", "Strategies", "Extras"])
+
+    with tabs_main[0]:
+        rl_tabs = st.tabs(["Trading DQL", "Hedging DQL", "Allocation"])
+        with rl_tabs[0]:
+            render_rl_trading()
+        with rl_tabs[1]:
+            render_rl_hedging()
+        with rl_tabs[2]:
+            render_rl_allocation()
+
+    with tabs_main[1]:
+        ph_tabs = st.tabs(["Pricing", "Delta Hedging"])
+        with ph_tabs[0]:
+            render_pricing_derivatives()
+        with ph_tabs[1]:
+            render_hedging_derivatives()
+
+    with tabs_main[2]:
+        sig_tabs = st.tabs(
+            [
+                "Stock Prediction",
+                "BTC PCA",
+                "Eigen Portfolio",
+                "Yield Curve Build",
+                "Yield Curve Predict",
+            ]
+        )
+        with sig_tabs[0]:
+            render_signals_stock_prediction()
+        with sig_tabs[1]:
+            render_signals_btc_pca()
+        with sig_tabs[2]:
+            render_signals_eigen_portfolio()
+        with sig_tabs[3]:
+            render_signals_yield_curve_construction()
+        with sig_tabs[4]:
+            render_signals_yield_curve_prediction()
+
+    with tabs_main[3]:
+        strat_tabs = st.tabs(["BTC MA", "Crypto Allocation", "RL SP500", "NLP Sentiment"])
+        with strat_tabs[0]:
+            render_strategies_btc_ma()
+        with strat_tabs[1]:
+            render_strategies_crypto_allocation()
+        with strat_tabs[2]:
+            render_strategies_rl_sp500()
+        with strat_tabs[3]:
+            render_strategies_nlp_sentiment()
+
+    with tabs_main[4]:
+        render_extra_nlp_notebook()
+
+
+if __name__ == "__main__":
+    main()
