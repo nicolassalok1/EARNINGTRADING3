@@ -1,503 +1,457 @@
-import streamlit as st
-import pandas as pd
+import sys
+import io
+import math
+import random
+import contextlib
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from ibapi.client import EClient
-from ibapi.wrapper import EWrapper
-from ibapi.contract import Contract
-from datetime import datetime, timedelta
-import threading
-import time
-import warnings
-from scipy.stats import norm
-warnings.filterwarnings('ignore')
+import streamlit as st
+import torch
+from scipy import stats
+from scipy.optimize import minimize
 
-# IB API Integration
-class IBApp(EWrapper, EClient):
-    def __init__(self):
-        EClient.__init__(self, self)
-        self.connected = False
-        self.historical_data = {}
-        
-    def error(self, reqId, errorCode, errorString, *args):
-        if errorCode == 2176 and "fractional share" in errorString.lower():
-            return
-        print(f"Error {errorCode}: {errorString}")
-        
-    def nextValidId(self, orderId):
-        self.connected = True
-        print("Connected to IB")
-        
-    def historicalData(self, reqId, bar):
-        if reqId not in self.historical_data:
-            self.historical_data[reqId] = []
-        self.historical_data[reqId].append({
-            'date': bar.date,
-            'open': bar.open,
-            'high': bar.high,
-            'low': bar.low,
-            'close': bar.close,
-            'volume': bar.volume
-        })
-        
-    def historicalDataEnd(self, reqId, start, end):
-        print(f"Historical data received for reqId {reqId}")
+BASE_DIR = Path(__file__).parent
+TO_COPY = BASE_DIR / "to_copy"
+if str(TO_COPY) not in sys.path:
+    sys.path.insert(0, str(TO_COPY))
 
-# Helper Functions
-def create_equity_contract(symbol):
-    contract = Contract()
-    contract.symbol = symbol.upper()
-    contract.secType = "STK"
-    contract.exchange = "SMART"
-    contract.currency = "USD"
-    return contract
+from finance import Finance
+from dqlagent_pytorch import DQLAgent, device
+from bsm73 import bsm_call_value
+from assetallocation_pytorch import Investing, InvestingAgent
 
-def create_vix_contract():
-    contract = Contract()
-    contract.symbol = "VIX"
-    contract.secType = "IND"
-    contract.exchange = "CBOE"
-    contract.currency = "USD"
-    return contract
 
-def black_scholes_call(S, K, T, r, sigma):
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    call_price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-    return call_price
-
-def black_scholes_put(S, K, T, r, sigma):
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    put_price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-    return put_price
-
-def calculate_delta(S, K, T, r, sigma, option_type='call'):
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    if option_type == 'call':
-        return norm.cdf(d1)
-    else:
-        return -norm.cdf(-d1)
-
-def calculate_vega(S, K, T, r, sigma):
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    return S * norm.pdf(d1) * np.sqrt(T) / 100
-
-# Initialize session state
-if 'ib_app' not in st.session_state:
-    st.session_state.ib_app = None
-if 'connected' not in st.session_state:
-    st.session_state.connected = False
-if 'stock_data' not in st.session_state:
-    st.session_state.stock_data = None
-if 'vix_data' not in st.session_state:
-    st.session_state.vix_data = None
-if 'iv_data' not in st.session_state:
-    st.session_state.iv_data = None
-if 'analysis_results' not in st.session_state:
-    st.session_state.analysis_results = None
-
-# Page config
-st.set_page_config(page_title="Earnings Trading Dashboard", layout="wide")
-st.title("📊 Earnings Trading Dashboard - IV Crush Analysis")
-
-# Sidebar - IB Connection
-st.sidebar.header("Interactive Brokers Connection")
-host = st.sidebar.text_input("Host", value="127.0.0.1")
-port = st.sidebar.number_input("Port", value=7497, step=1)
-
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    if st.button("Connect", disabled=st.session_state.connected):
-        try:
-            st.session_state.ib_app = IBApp()
-            
-            def connect_thread():
-                try:
-                    st.session_state.ib_app.connect(host, int(port), 0)
-                    st.session_state.ib_app.run()
-                except Exception as e:
-                    st.error(f"Connection error: {e}")
-            
-            thread = threading.Thread(target=connect_thread, daemon=True)
-            thread.start()
-            
-            # Wait for connection
-            for i in range(100):
-                if st.session_state.ib_app.connected:
-                    try:
-                        server_version = st.session_state.ib_app.serverVersion()
-                        if server_version is not None and server_version > 0:
-                            st.session_state.connected = True
-                            st.sidebar.success(f"Connected (Server: {server_version})")
-                            break
-                    except:
-                        pass
-                time.sleep(0.1)
-            
-            if not st.session_state.connected:
-                st.sidebar.error("Failed to connect")
-        except Exception as e:
-            st.sidebar.error(f"Error: {e}")
-
-with col2:
-    if st.button("Disconnect", disabled=not st.session_state.connected):
-        if st.session_state.ib_app:
-            st.session_state.ib_app.disconnect()
-            st.session_state.connected = False
-            st.session_state.ib_app = None
-            st.sidebar.info("Disconnected")
-
-# Main interface
-st.sidebar.header("Analysis Setup")
-ticker = st.sidebar.text_input("Ticker", value="NVDA").upper()
-earnings_date_str = st.sidebar.text_input("Earnings Date (YYYY-MM-DD)", value="2025-08-27")
-days_to_expiry = st.sidebar.number_input("Days to Expiry", value=30, min_value=1, max_value=365)
-
-if st.sidebar.button("Analyze IV Crush", disabled=not st.session_state.connected):
+# ---------- Helpers ----------
+def set_global_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
     try:
-        earnings_date = datetime.strptime(earnings_date_str, "%Y-%m-%d")
-        
-        with st.spinner("Fetching data from Interactive Brokers..."):
-            # Calculate date range
-            start_date = earnings_date - timedelta(days=10)
-            end_date = earnings_date + timedelta(days=10)
-            
-            # Clear previous data
-            st.session_state.ib_app.historical_data.clear()
-            
-            # Query stock data
-            stock_contract = create_equity_contract(ticker)
-            if 1 in st.session_state.ib_app.historical_data:
-                del st.session_state.ib_app.historical_data[1]
-            
-            st.session_state.ib_app.reqHistoricalData(
-                reqId=1,
-                contract=stock_contract,
-                endDateTime=end_date.strftime("%Y%m%d %H:%M:%S"),
-                durationStr="3 W",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=1,
-                formatDate=1,
-                keepUpToDate=False,
-                chartOptions=[]
-            )
-            
-            # Wait for stock data
-            timeout = 15
-            start_time = time.time()
-            while 1 not in st.session_state.ib_app.historical_data and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-            
-            if 1 in st.session_state.ib_app.historical_data:
-                stock_data = pd.DataFrame(st.session_state.ib_app.historical_data[1])
-                stock_data['date'] = pd.to_datetime(stock_data['date'])
-                stock_data.set_index('date', inplace=True)
-                st.session_state.stock_data = stock_data
-            
-            # Query VIX data
-            vix_contract = create_vix_contract()
-            if 2 in st.session_state.ib_app.historical_data:
-                del st.session_state.ib_app.historical_data[2]
-            
-            st.session_state.ib_app.reqHistoricalData(
-                reqId=2,
-                contract=vix_contract,
-                endDateTime=end_date.strftime("%Y%m%d %H:%M:%S"),
-                durationStr="3 W",
-                barSizeSetting="1 day",
-                whatToShow="TRADES",
-                useRTH=1,
-                formatDate=1,
-                keepUpToDate=False,
-                chartOptions=[]
-            )
-            
-            start_time = time.time()
-            while 2 not in st.session_state.ib_app.historical_data and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-            
-            if 2 in st.session_state.ib_app.historical_data:
-                vix_data = pd.DataFrame(st.session_state.ib_app.historical_data[2])
-                vix_data['date'] = pd.to_datetime(vix_data['date'])
-                vix_data.set_index('date', inplace=True)
-                st.session_state.vix_data = vix_data
-            
-            # Query IV data
-            if 3 in st.session_state.ib_app.historical_data:
-                del st.session_state.ib_app.historical_data[3]
-            
-            st.session_state.ib_app.reqHistoricalData(
-                reqId=3,
-                contract=stock_contract,
-                endDateTime=end_date.strftime("%Y%m%d %H:%M:%S"),
-                durationStr="3 W",
-                barSizeSetting="1 day",
-                whatToShow="OPTION_IMPLIED_VOLATILITY",
-                useRTH=1,
-                formatDate=1,
-                keepUpToDate=False,
-                chartOptions=[]
-            )
-            
-            start_time = time.time()
-            while 3 not in st.session_state.ib_app.historical_data and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-            
-            if 3 in st.session_state.ib_app.historical_data:
-                iv_data = pd.DataFrame(st.session_state.ib_app.historical_data[3])
-                iv_data['date'] = pd.to_datetime(iv_data['date'])
-                iv_data.set_index('date', inplace=True)
-                
-                raw_iv = iv_data['close']
-                if raw_iv.max() > 5:
-                    daily_iv_decimal = raw_iv / 100.0
-                    iv_data['implied_vol'] = daily_iv_decimal
-                else:
-                    iv_data['implied_vol'] = raw_iv
-                
-                st.session_state.iv_data = iv_data
-        
-        # Perform analysis
-        stock_data = st.session_state.stock_data
-        stock_dates = stock_data.index
-        
-        pre_date_actual = stock_dates[stock_dates <= earnings_date].max() if len(stock_dates[stock_dates <= earnings_date]) > 0 else stock_dates.min()
-        post_date_actual = stock_dates[stock_dates > earnings_date].min() if len(stock_dates[stock_dates > earnings_date]) > 0 else stock_dates.max()
-        
-        pre_stock_price = stock_data.loc[pre_date_actual, 'close']
-        post_open = stock_data.loc[post_date_actual, 'open']
-        post_close = stock_data.loc[post_date_actual, 'close']
-        post_stock_price = (post_open + post_close) / 2
-        
-        # Get IV values
-        if st.session_state.iv_data is not None:
-            iv_dates = st.session_state.iv_data.index
-            pre_iv_date = iv_dates[iv_dates <= earnings_date].max() if len(iv_dates[iv_dates <= earnings_date]) > 0 else iv_dates.min()
-            post_iv_date = iv_dates[iv_dates > earnings_date].min() if len(iv_dates[iv_dates > earnings_date]) > 0 else iv_dates.max()
-            
-            pre_iv = st.session_state.iv_data.loc[pre_iv_date, 'implied_vol']
-            post_iv = st.session_state.iv_data.loc[post_iv_date, 'implied_vol']
+        import torch
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
+
+
+def capture_logs(fn, *args, **kwargs):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        result = fn(*args, **kwargs)
+    return buf.getvalue(), result
+
+
+@st.cache_data(show_spinner=False)
+def load_raw_data():
+    url = "https://certificate.tpq.io/rl4finance.csv"
+    return pd.read_csv(url, index_col=0, parse_dates=True).dropna()
+
+
+def plot_rewards(rewards, title):
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.plot(rewards, color="tab:blue", lw=1.5)
+    ax.set_title(title)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Total reward")
+    ax.grid(True, alpha=0.3)
+    return fig
+
+
+# ---------- Hedging classes (notebook 07) ----------
+class ObservationSpace:
+    def __init__(self, n):
+        self.shape = (n,)
+
+
+class ActionSpace:
+    def __init__(self, n):
+        self.n = n
+
+    def seed(self, seed):
+        random.seed(seed)
+
+    def sample(self):
+        return random.random()
+
+
+def simulate_gbm(S0, T, r, sigma, steps):
+    path = [S0]
+    dt = T / steps
+    for _ in range(steps):
+        st = path[-1] * math.exp((r - sigma ** 2 / 2) * dt +
+                                 sigma * math.sqrt(dt) * random.gauss(0, 1))
+        path.append(st)
+    return np.array(path)
+
+
+def bsm_delta(St, K, T, t, r, sigma):
+    d1 = ((math.log(St / K) + (r + 0.5 * sigma ** 2) * (T - t)) /
+          (sigma * math.sqrt(T - t)))
+    return stats.norm.cdf(d1, 0, 1)
+
+
+def option_replication(path, K, T, r, sigma):
+    dt = T / (len(path) - 1)
+    bond = [math.exp(r * i * dt) for i in range(len(path))]
+    res = pd.DataFrame()
+    for i in range(len(path) - 1):
+        C = bsm_call_value(path[i], K, T, i * dt, r, sigma)
+        if i == 0:
+            s = bsm_delta(path[i], K, T, i * dt, r, sigma)
+            b = (C - s * path[i]) / bond[i]
         else:
-            # Estimate from VIX
-            if st.session_state.vix_data is not None:
-                vix_dates = st.session_state.vix_data.index
-                pre_vix_date = vix_dates[vix_dates <= earnings_date].max()
-                post_vix_date = vix_dates[vix_dates > earnings_date].min()
-                pre_vix = st.session_state.vix_data.loc[pre_vix_date, 'close']
-                post_vix = st.session_state.vix_data.loc[post_vix_date, 'close']
-                pre_iv = pre_vix / 100.0 * 1.5
-                post_iv = post_vix / 100.0 * 1.2
-            else:
-                pre_iv = 0.40
-                post_iv = 0.25
-        
-        # Calculate IV crush
-        iv_crush_pct = (pre_iv - post_iv) / pre_iv * 100
-        
-        # Option pricing
-        time_to_expiry = days_to_expiry / 365.0
-        atm_strike_price = pre_stock_price
-        risk_free_rate = 0.05
-        
-        pre_call_price = black_scholes_call(pre_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, pre_iv)
-        pre_put_price = black_scholes_put(pre_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, pre_iv)
-        post_call_price = black_scholes_call(post_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, post_iv)
-        post_put_price = black_scholes_put(post_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, post_iv)
-        
-        pre_straddle_price = pre_call_price + pre_put_price
-        post_straddle_price = post_call_price + post_put_price
-        straddle_change = post_straddle_price - pre_straddle_price
-        straddle_change_pct = straddle_change / pre_straddle_price * 100
-        
-        # Greeks
-        pre_call_delta = calculate_delta(pre_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, pre_iv, 'call')
-        pre_put_delta = calculate_delta(pre_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, pre_iv, 'put')
-        post_call_delta = calculate_delta(post_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, post_iv, 'call')
-        post_put_delta = calculate_delta(post_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, post_iv, 'put')
-        
-        pre_straddle_delta = pre_call_delta + pre_put_delta
-        post_straddle_delta = post_call_delta + post_put_delta
-        
-        pre_vega = calculate_vega(pre_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, pre_iv) * 2
-        post_vega = calculate_vega(post_stock_price, atm_strike_price, time_to_expiry, risk_free_rate, post_iv) * 2
-        
-        # Store results
-        st.session_state.analysis_results = {
-            'ticker': ticker,
-            'earnings_date': earnings_date,
-            'pre_date': pre_date_actual,
-            'post_date': post_date_actual,
-            'pre_stock_price': pre_stock_price,
-            'post_stock_price': post_stock_price,
-            'atm_strike': atm_strike_price,
-            'pre_iv': pre_iv,
-            'post_iv': post_iv,
-            'iv_crush_pct': iv_crush_pct,
-            'pre_call': pre_call_price,
-            'post_call': post_call_price,
-            'pre_put': pre_put_price,
-            'post_put': post_put_price,
-            'pre_straddle': pre_straddle_price,
-            'post_straddle': post_straddle_price,
-            'straddle_change': straddle_change,
-            'straddle_change_pct': straddle_change_pct,
-            'pre_delta': pre_straddle_delta,
-            'post_delta': post_straddle_delta,
-            'pre_vega': pre_vega,
-            'post_vega': post_vega,
-        }
-        
-        st.success("Analysis complete!")
-        
-    except Exception as e:
-        st.error(f"Error: {e}")
-        import traceback
-        st.code(traceback.format_exc())
+            V = s * path[i] + b * bond[i]
+            s = bsm_delta(path[i], K, T, i * dt, r, sigma)
+            b = (C - s * path[i]) / bond[i]
+            df = pd.DataFrame({"St": path[i], "C": C, "V": V,
+                               "s": s, "b": b}, index=[0])
+            res = pd.concat((res, df), ignore_index=True)
+    return res
 
-# Display results
-if st.session_state.analysis_results:
-    results = st.session_state.analysis_results
-    
-    st.header(f"📈 Analysis Results for {results['ticker']}")
-    
-    # Metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Stock Price (Pre)", f"${results['pre_stock_price']:.2f}")
-    with col2:
-        st.metric("Stock Price (Post)", f"${results['post_stock_price']:.2f}", 
-                 f"{((results['post_stock_price'] - results['pre_stock_price']) / results['pre_stock_price'] * 100):+.2f}%")
-    with col3:
-        st.metric("Pre-Earnings IV", f"{results['pre_iv']:.1%}")
-    with col4:
-        st.metric("IV Crush", f"-{results['iv_crush_pct']:.1f}%", delta_color="inverse")
-    
-    st.divider()
-    
-    # Options pricing
-    st.subheader("ATM Options Pricing & Straddle")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.write("**Pre-Earnings**")
-        st.write(f"Call: ${results['pre_call']:.2f}")
-        st.write(f"Put: ${results['pre_put']:.2f}")
-        st.write(f"**Straddle: ${results['pre_straddle']:.2f}**")
-    
-    with col2:
-        st.write("**Post-Earnings**")
-        st.write(f"Call: ${results['post_call']:.2f}")
-        st.write(f"Put: ${results['post_put']:.2f}")
-        st.write(f"**Straddle: ${results['post_straddle']:.2f}**")
-    
-    with col3:
-        st.write("**Change**")
-        call_change = results['post_call'] - results['pre_call']
-        put_change = results['post_put'] - results['pre_put']
-        st.write(f"Call: ${call_change:+.2f}")
-        st.write(f"Put: ${put_change:+.2f}")
-        st.write(f"**Straddle: ${results['straddle_change']:+.2f} ({results['straddle_change_pct']:+.1f}%)**")
-    
-    st.divider()
-    
-    # P/L Analysis
-    st.subheader("P/L Analysis")
-    col1, col2 = st.columns(2)
-    with col1:
-        long_pnl = results['straddle_change']
-        st.metric("LONG Straddle P/L", f"${long_pnl:+.2f}", f"{results['straddle_change_pct']:+.1f}%")
-    with col2:
-        short_pnl = -results['straddle_change']
-        st.metric("SHORT Straddle P/L", f"${short_pnl:+.2f}", f"{-results['straddle_change_pct']:+.1f}%")
-    
-    st.divider()
-    
-    # Greeks
-    st.subheader("Greeks Analysis")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Pre-Earnings Delta", f"{results['pre_delta']:.3f}")
-    with col2:
-        st.metric("Post-Earnings Delta", f"{results['post_delta']:.3f}", 
-                 f"{results['post_delta'] - results['pre_delta']:+.3f}")
-    with col3:
-        st.metric("Pre-Earnings Vega", f"{results['pre_vega']:.2f}")
-    with col4:
-        st.metric("Post-Earnings Vega", f"{results['post_vega']:.2f}", 
-                 f"{results['post_vega'] - results['pre_vega']:+.2f}")
-    
-    st.divider()
-    
-    # Visualizations
-    st.subheader("IV Crush Visualization")
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    
-    # Plot 1: Stock price and IV
-    if st.session_state.stock_data is not None:
-        earnings_date = results['earnings_date']
-        window_stock = st.session_state.stock_data[
-            (st.session_state.stock_data.index >= earnings_date - timedelta(days=5)) &
-            (st.session_state.stock_data.index <= earnings_date + timedelta(days=5))
-        ]
-        
-        ax1.plot(window_stock.index, window_stock['close'], 'b-', linewidth=2, label='Stock Price')
-        ax1.axvline(x=earnings_date, color='red', linestyle='--', alpha=0.7, label='Earnings Date')
-        ax1.set_xlabel('Date')
-        ax1.set_ylabel('Stock Price ($)', color='blue')
-        ax1.tick_params(axis='y', labelcolor='blue')
-        ax1.set_title(f'{results["ticker"]} Stock Price Around Earnings')
+
+class Hedging:
+    def __init__(self, S0, K_, T, r_, sigma_, steps):
+        self.initial_value = S0
+        self.strike_ = K_
+        self.maturity = T
+        self.short_rate_ = r_
+        self.volatility_ = sigma_
+        self.steps = steps
+        self.observation_space = ObservationSpace(5)
+        self.osn = self.observation_space.shape[0]
+        self.action_space = ActionSpace(1)
+        self._simulate_data()
+        self.portfolios = pd.DataFrame()
+        self.episode = 0
+
+    def _simulate_data(self):
+        s = [self.initial_value]
+        self.strike = random.choice(self.strike_)
+        self.short_rate = random.choice(self.short_rate_)
+        self.volatility = random.choice(self.volatility_)
+        self.dt = self.maturity / self.steps
+        for _ in range(1, self.steps + 1):
+            st = s[-1] * math.exp(
+                (self.short_rate - self.volatility ** 2 / 2) * self.dt +
+                self.volatility * math.sqrt(self.dt) * random.gauss(0, 1))
+            s.append(st)
+        self.data = pd.DataFrame(s, columns=["index"])
+        self.data["bond"] = np.exp(self.short_rate *
+                                   np.arange(len(self.data)) * self.dt)
+
+    def _get_state(self):
+        St = self.data["index"].iloc[self.bar]
+        Bt = self.data["bond"].iloc[self.bar]
+        ttm = self.maturity - self.bar * self.dt
+        if ttm > 0:
+            Ct = bsm_call_value(St, self.strike, self.maturity,
+                                self.bar * self.dt, self.short_rate,
+                                self.volatility)
+        else:
+            Ct = max(St - self.strike, 0)
+        return np.array([St, Bt, ttm, Ct, self.strike, self.short_rate,
+                         self.stock, self.bond]), {}
+
+    def seed(self, seed=None):
+        if seed is not None:
+            random.seed(seed)
+
+    def reset(self):
+        self.bar = 0
+        self.bond = 0
+        self.stock = 0
+        self.treward = 0
+        self.episode += 1
+        self._simulate_data()
+        self.state, _ = self._get_state()
+        return self.state, _
+
+    def step(self, action):
+        if self.bar == 0:
+            reward = 0
+            self.bar += 1
+            self.stock = float(action)
+            self.bond = ((self.state[3] - self.stock * self.state[0]) /
+                         self.state[1])
+            self.new_state, _ = self._get_state()
+        else:
+            self.bar += 1
+            self.new_state, _ = self._get_state()
+            phi_value = (self.stock * self.new_state[0] +
+                         self.bond * self.new_state[1])
+            pl = phi_value - self.new_state[3]
+            df = pd.DataFrame({"e": self.episode, "s": self.stock,
+                               "b": self.bond, "phi": phi_value,
+                               "C": self.new_state[3], "p&l[$]": pl,
+                               "p&l[%]": pl / max(self.new_state[3], 1e-4) * 100,
+                               "St": self.new_state[0],
+                               "Bt": self.new_state[1],
+                               "K": self.strike, "r": self.short_rate,
+                               "sigma": self.volatility}, index=[0])
+            self.portfolios = pd.concat((self.portfolios, df),
+                                        ignore_index=True)
+            reward = -(phi_value - self.new_state[3]) ** 2
+            self.stock = float(action)
+            self.bond = ((self.new_state[3] -
+                          self.stock * self.new_state[0]) /
+                         self.new_state[1])
+        done = self.bar == len(self.data) - 1
+        self.state = self.new_state
+        return self.state, float(reward), done, False, {}
+
+
+class HedgingAgent(DQLAgent):
+    def opt_action(self, state):
+        bnds = [(0, 1)]
+
+        def f_obj(x):
+            s = state.copy()
+            s[0, 6] = x
+            s[0, 7] = ((s[0, 3] - x * s[0, 0]) / s[0, 1])
+            s_tensor = torch.FloatTensor(s).to(device)
+            with torch.no_grad():
+                q_val = self.model(s_tensor)
+            return q_val.cpu().numpy()[0, 0]
+
+        try:
+            res = minimize(lambda x: -f_obj(x), 0.5,
+                           bounds=bnds, method="Powell")
+            action = res["x"][0]
+        except Exception:
+            action = self.env.stock
+        return action
+
+    def act(self, state):
+        if random.random() <= self.epsilon:
+            return self.env.action_space.sample()
+        return self.opt_action(state)
+
+    def replay(self):
+        if len(self.memory) < self.batch_size:
+            return
+        batch = random.sample(self.memory, self.batch_size)
+        for state, action, next_state, reward, done in batch:
+            target = torch.tensor([reward], dtype=torch.float32).to(device)
+            if not done:
+                ns = next_state.copy()
+                opt_act = self.opt_action(ns)
+                ns[0, 6] = opt_act
+                ns[0, 7] = ((ns[0, 3] - opt_act * ns[0, 0]) / ns[0, 1])
+                ns_tensor = torch.FloatTensor(ns).to(device)
+                with torch.no_grad():
+                    future_q = self.model(ns_tensor)[0, 0]
+                target = target + self.gamma * future_q
+            state_tensor = torch.FloatTensor(state).to(device)
+            self.optimizer.zero_grad()
+            current_q = self.model(state_tensor)[0, 0]
+            loss = self.criterion(current_q, target)
+            loss.backward()
+            self.optimizer.step()
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+    def test(self, episodes, verbose=True):
+        for e in range(1, episodes + 1):
+            state, _ = self.env.reset()
+            state = self._reshape(state)
+            treward = 0
+            for _ in range(1, len(self.env.data) + 1):
+                action = self.opt_action(state)
+                state, reward, done, trunc, _ = self.env.step(action)
+                state = self._reshape(state)
+                treward += reward
+                if done:
+                    if verbose:
+                        templ = f"total penalty={treward:4.2f}"
+                        print(templ)
+                    break
+
+
+# ---------- Tabs ----------
+st.set_page_config(page_title="RL4F Notebooks en Streamlit", layout="wide")
+st.title("RL4F : trois notebooks regroupés")
+st.caption("Chaque onglet reflète un notebook (06, 07, 08) avec des paramètres ajustables.")
+
+tabs = st.tabs([
+    "06 · Trading DQL",
+    "07 · Hedging",
+    "08 · Allocation 3AC",
+])
+
+
+with tabs[0]:
+    st.subheader("Notebook 06 — Agent DQL sur données historiques")
+    st.write("Entraînement rapide d’un agent DQL sur la série `rl4finance.csv` "
+             "via l’environnement `Finance`.")
+
+    data = load_raw_data()
+    symbols = sorted(data.columns)
+    col_a, col_b, col_c = st.columns([1.5, 1, 1])
+    with col_a:
+        symbol = st.selectbox("Symbole", symbols, index=0)
+    with col_b:
+        n_features = st.slider("Fenêtre (lags)", 4, 30, 8, 1)
+        min_acc = st.slider("Seuil d'exactitude", 0.0, 1.0, 0.50, 0.01)
+    with col_c:
+        episodes = st.slider("Episodes d'entraînement", 1, 200, 20, 1)
+        test_episodes = st.slider("Episodes de test", 1, 50, 5, 1)
+    seed = st.number_input("Seed", value=100, step=1)
+    lr = st.number_input("Learning rate", value=0.0005, format="%.6f")
+
+    st.dataframe(data[[symbol]].head(), use_container_width=True)
+
+    if st.button("Lancer l'entraînement Trading"):
+        set_global_seed(seed)
+        finance = Finance(symbol, "r", min_accuracy=min_acc,
+                          n_features=n_features)
+        agent = DQLAgent(finance.symbol, finance.feature,
+                         finance.n_features, finance, lr=lr)
+        with st.spinner("Entraînement en cours..."):
+            train_logs, _ = capture_logs(agent.learn, episodes)
+        finance.min_accuracy = 0.0
+        with st.spinner("Tests..."):
+            test_logs, _ = capture_logs(agent.test, test_episodes,
+                                        min_accuracy=0.0,
+                                        min_performance=0.0,
+                                        verbose=False, full=False)
+        st.success("Terminé.")
+        st.text_area("Journal (entrainement + test)",
+                     (train_logs + test_logs)[-4000:], height=180)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Episodes vus", len(agent.trewards))
+        with col2:
+            st.metric("Max reward", f"{agent.max_treward:.2f}")
+        with col3:
+            st.metric("Epsilon final", f"{agent.epsilon:.3f}")
+
+        if agent.trewards:
+            fig = plot_rewards(agent.trewards,
+                               "Récompense cumulée par épisode")
+            st.pyplot(fig)
+
+
+with tabs[1]:
+    st.subheader("Notebook 07 — Hedging (delta et DQL)")
+    st.write("Simulation GBM + réplication delta et agent DQL pour ajuster la couverture.")
+
+    col_a, col_b, col_c, col_d = st.columns(4)
+    with col_a:
+        S0 = st.number_input("S0", value=100.0, step=1.0)
+        T = st.number_input("Maturité (années)", value=1.0, step=0.25)
+    with col_b:
+        K = st.number_input("Strike K", value=100.0, step=5.0)
+        steps = st.slider("Pas de temps", 50, 400, 252, 10)
+    with col_c:
+        r = st.number_input("Taux r", value=0.05, format="%.4f")
+        sigma = st.number_input("Vol (sigma)", value=0.20, format="%.4f")
+    with col_d:
+        seed_h = st.number_input("Seed hedging", value=750, step=1)
+        episodes_h = st.slider("Episodes DQL", 1, 100, 10, 1)
+        test_h = st.slider("Episodes test", 1, 50, 5, 1)
+
+    st.markdown("**Réplication delta BSM**")
+    if st.button("Simuler réplication delta"):
+        set_global_seed(seed_h)
+        path = simulate_gbm(S0, T, r, sigma, steps)
+        rep = option_replication(path, K, T, r, sigma)
+        st.write(rep.head())
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        ax1.plot(path, lw=1.2, color="tab:blue")
+        ax1.set_title("Trajectoire simulée")
+        ax1.set_xlabel("Pas")
+        ax1.set_ylabel("Prix")
+        if not rep.empty:
+            ax2.plot(rep["C"].values, label="Call", lw=1.1)
+            ax2.plot(rep["V"].values, label="Portefeuille", lw=1.1)
+            ax2.set_title("Call vs portefeuille répliquant")
+            ax2.legend()
         ax1.grid(True, alpha=0.3)
-        ax1.legend(loc='upper left')
-        
-        # Plot IV if available
-        if st.session_state.iv_data is not None:
-            window_iv = st.session_state.iv_data[
-                (st.session_state.iv_data.index >= earnings_date - timedelta(days=5)) &
-                (st.session_state.iv_data.index <= earnings_date + timedelta(days=5))
-            ]
-            
-            if len(window_iv) > 0:
-                ax1_twin = ax1.twinx()
-                iv_percentage = window_iv['implied_vol'] * 100
-                ax1_twin.plot(window_iv.index, iv_percentage, 'g-', linewidth=2, label='Implied Volatility')
-                ax1_twin.set_ylabel('Implied Volatility (%)', color='green')
-                ax1_twin.tick_params(axis='y', labelcolor='green')
-                ax1_twin.legend(loc='upper right')
-        
-        ax1.tick_params(axis='x', rotation=45)
-    
-    # Plot 2: Options comparison
-    option_types = ['Call', 'Put', 'Straddle']
-    pre_prices = [results['pre_call'], results['pre_put'], results['pre_straddle']]
-    post_prices = [results['post_call'], results['post_put'], results['post_straddle']]
-    
-    x = np.arange(len(option_types))
-    width = 0.35
-    
-    bars1 = ax2.bar(x - width/2, pre_prices, width, label='Pre-Earnings (High IV)', color='lightblue', alpha=0.8)
-    bars2 = ax2.bar(x + width/2, post_prices, width, label='Post-Earnings (Low IV)', color='lightcoral', alpha=0.8)
-    
-    for i, (bar1, bar2) in enumerate(zip(bars1, bars2)):
-        height1 = bar1.get_height()
-        height2 = bar2.get_height()
-        ax2.text(bar1.get_x() + bar1.get_width()/2., height1 + 0.5,
-                f'${height1:.1f}', ha='center', va='bottom', fontsize=9)
-        ax2.text(bar2.get_x() + bar2.get_width()/2., height2 + 0.5,
-                f'${height2:.1f}', ha='center', va='bottom', fontsize=9)
-    
-    ax2.set_xlabel('Option Strategy')
-    ax2.set_ylabel('Option Price ($)')
-    ax2.set_title('ATM Options & Straddle: IV Crush Impact')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(option_types)
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    fig.tight_layout()
-    st.pyplot(fig)
+        ax2.grid(True, alpha=0.3)
+        st.pyplot(fig)
 
-else:
-    st.info("Connect to Interactive Brokers and run an analysis to see results.")
+    st.markdown("**Agent de couverture DQL**")
+    lr_h = st.number_input("Learning rate (hedging)", value=0.001, format="%.6f")
+    hu_h = st.slider("Hidden units", 8, 256, 128, 8)
+    if st.button("Entraîner l'agent Hedging"):
+        set_global_seed(seed_h)
+        Ks = np.array([0.9, 0.95, 1.0, 1.05, 1.10]) * K
+        rs = [0, r / 2, r]
+        sigmas = [max(sigma / 2, 1e-4), sigma, sigma * 1.5]
+        env = Hedging(S0=S0, K_=Ks, T=T, r_=rs, sigma_=sigmas, steps=steps)
+        agent = HedgingAgent("SYM", feature=None, n_features=8,
+                             env=env, hu=hu_h, lr=lr_h)
+        with st.spinner("Entraînement..."):
+            train_logs, _ = capture_logs(agent.learn, episodes_h)
+        env.portfolios = pd.DataFrame()
+        with st.spinner("Tests..."):
+            test_logs, _ = capture_logs(agent.test, test_h, verbose=False)
+        st.success("Terminé.")
+        st.text_area("Journal hedging", (train_logs + test_logs)[-4000:],
+                     height=160)
+        st.metric("Epsilon final", f"{agent.epsilon:.3f}")
+        if not env.portfolios.empty:
+            last_ep = env.portfolios["e"].max()
+            sample = env.portfolios[env.portfolios["e"] == last_ep]
+            st.write("P&L échantillon (dernier épisode)")
+            st.dataframe(sample[["p&l[$]", "p&l[%]", "St", "C"]].head(),
+                         use_container_width=True)
+            fig = plot_rewards(agent.trewards, "Pénalité cumulée")
+            st.pyplot(fig)
+
+
+with tabs[2]:
+    st.subheader("Notebook 08 — Allocation à trois actifs (InvestingAgent)")
+    st.write("Réplique l’agent d’allocation 3AC avec un entraînement court.")
+
+    df = load_raw_data()
+    symbols = sorted(df.columns)
+    col_a, col_b, col_c, col_d = st.columns(4)
+    with col_a:
+        asset_x = st.selectbox("Actif X", symbols, index=0)
+    with col_b:
+        asset_y = st.selectbox("Actif Y", symbols, index=1)
+    with col_c:
+        asset_z = st.selectbox("Actif Z", symbols, index=2)
+    with col_d:
+        steps_inv = st.slider("Pas (jours)", 50, 400, 252, 10)
+        seed_inv = st.number_input("Seed allocation", value=100, step=1)
+    episodes_inv = st.slider("Episodes entraînement", 1, 100, 10, 1)
+    test_inv = st.slider("Episodes test", 1, 50, 10, 1)
+    lr_inv = st.number_input("Learning rate allocation", value=0.00025,
+                             format="%.6f")
+    hu_inv = st.slider("Hidden units allocation", 8, 256, 128, 8)
+
+    st.dataframe(df[[asset_x, asset_y, asset_z]].head(),
+                 use_container_width=True)
+
+    if st.button("Lancer l'agent d'allocation"):
+        set_global_seed(seed_inv)
+        investing = Investing(asset_x, asset_y, asset_z,
+                              steps=steps_inv, amount=1)
+        agent = InvestingAgent("3AC", feature=None, n_features=6,
+                               env=investing, hu=hu_inv, lr=lr_inv)
+        with st.spinner("Entraînement allocation..."):
+            train_logs, _ = capture_logs(agent.learn, episodes_inv)
+        investing.portfolios = pd.DataFrame()
+        with st.spinner("Tests allocation..."):
+            test_logs, _ = capture_logs(agent.test, test_inv, verbose=False)
+        st.success("Terminé.")
+        st.text_area("Journal allocation", (train_logs + test_logs)[-4000:],
+                     height=160)
+        if not investing.portfolios.empty:
+            last_ep = investing.portfolios["e"].max()
+            sample = investing.portfolios[investing.portfolios["e"] == last_ep]
+            alloc_cols = ["xt", "yt", "zt", "pv"]
+            st.write("Trajectoire (dernier épisode)")
+            st.dataframe(sample[alloc_cols].head(), use_container_width=True)
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.plot(sample["pv"].values, lw=1.4, color="tab:green")
+            ax.set_title("Valeur de portefeuille")
+            ax.set_xlabel("Pas")
+            ax.set_ylabel("PV")
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
