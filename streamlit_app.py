@@ -8,10 +8,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import streamlit as st
 import torch
 from scipy import stats
 from scipy.optimize import minimize
+from wordcloud import WordCloud
 
 BASE_DIR = Path(__file__).parent
 SOURCES_DIR = BASE_DIR / "sources"
@@ -75,7 +77,11 @@ def load_next_csv(name, parse_dates=None):
             f"Fichier manquant : {name} (cherché dans {SOURCES_DIR})"
         )
     path = candidates[0]
-    return pd.read_csv(path, parse_dates=parse_dates)
+    try:
+        return pd.read_csv(path, parse_dates=parse_dates)
+    except pd.errors.ParserError:
+        # Certains CSV utilisent ';' : retente avec ce séparateur
+        return pd.read_csv(path, parse_dates=parse_dates, sep=";")
 
 
 def train_test_split_series(series, train_ratio=0.8):
@@ -715,23 +721,115 @@ def render_strategies_nlp_sentiment():
         st.error(f"Lecture impossible ({exc})")
 
 
-def render_extra_nlp_notebook():
-    st.subheader("Extras · Notebook NLP")
-    notebook_path = SOURCES_DIR / "extra_nlp" / "nlp.ipynb"
-    if notebook_path.exists():
-        st.write("Notebook importé depuis `to_merge/nlp.ipynb`.")
-        st.code(str(notebook_path))
-        st.write(f"Taille : {notebook_path.stat().st_size / 1024:.1f} Ko")
-    else:
-        st.error("Notebook NLP manquant.")
+def render_extra_nlp_overview():
+    st.subheader("NLP · Overview")
+    st.write(
+        "Mini labo NLP intégré : wordcloud synthétique, vecteurs doc-term 3D et démo cosinus. "
+        "Tout est exécuté dans l’app (pas de lecture du notebook)."
+    )
+    st.write(
+        "- Wordcloud : génère des tweets fictifs sur des tickers/sentiments.\n"
+        "- Doc Vectors : matrice doc-term simplifiée + scatter 3D.\n"
+        "- Cosine Sim : visualisation interactive de cos(θ) entre deux vecteurs."
+    )
+    st.info("Utilisez les sous-onglets pour tester ces démos.")
+
+
+def render_extra_nlp_wordcloud():
+    st.subheader("NLP · Wordcloud & Tokens")
+    st.write("Génère des tweets fictifs (tickers + sentiments) puis un wordcloud.")
+
+    tickers = ["$AAPL", "$TSLA", "$GOOG", "$AMZN", "$MSFT", "$NVDA", "$META", "$BTC", "$ETH", "$NFLX"]
+    sentiments = ["bullish", "bearish", "range", "breakout", "momentum", "mean-revert", "macro", "earnings", "AI", "chips"]
+    emojis = ["🚀", "📉", "🤖", "📈", "💤", "⚠️", "🧠", "💰"]
+    n_tweets = st.slider("Nombre de tweets synthétiques", 20, 200, 80, 10, key="nlp_wc_count")
+    random.seed(42)
+    tweets = []
+    for _ in range(n_tweets):
+        t = random.choice(tickers)
+        s = random.choice(sentiments)
+        e = random.choice(emojis)
+        tweets.append(f"{t} looks {s} {e}")
+    text = " ".join(tweets)
+    wc = WordCloud(width=800, height=400, background_color="white").generate(text)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.imshow(wc, interpolation="bilinear")
+    ax.axis("off")
+    st.pyplot(fig)
+    st.write("Aperçu des tokens :", ", ".join(tweets[:5]) + " ...")
+
+
+def render_extra_nlp_vectors():
+    st.subheader("NLP · Doc-Term Vectors")
+    st.write("Visualisation 3D de 5 documents simples (doc-term matrix) et de leurs similarités géométriques.")
+
+    raw_vectors = np.array(
+        [
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+            [1, 1, 0],
+            [0.5, 0.5, 0.5],
+        ]
+    )
+    labels = ["Doc1", "Doc2", "Doc3", "Doc4", "Doc5"]
+    df = pd.DataFrame(raw_vectors, columns=["x", "y", "z"], index=labels)
+    st.dataframe(df, width="stretch")
+
+    try:
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter3d(
+                x=df["x"],
+                y=df["y"],
+                z=df["z"],
+                mode="markers+text",
+                text=labels,
+                textposition="top center",
+                marker=dict(size=6, color="orange"),
+            )
+        )
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            scene=dict(xaxis_title="x", yaxis_title="y", zaxis_title="z"),
+            height=420,
+        )
+        st.plotly_chart(fig, width="stretch")
+    except Exception as exc:
+        st.error(f"Plotly non disponible ({exc})")
+
+
+def render_extra_nlp_cosine():
+    st.subheader("NLP · Cosine Similarity")
+    st.write("Choisissez l’angle entre deux vecteurs pour voir la similarité (cos θ).")
+
+    angle = st.slider("Angle (degrés)", 0, 180, 45, 5, key="nlp_cos_angle")
+    theta = math.radians(angle)
+    cosine = math.cos(theta)
+    st.metric("cos(θ)", f"{cosine:.3f}")
+
+    v1 = np.array([1, 0])
+    rot = np.array([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]])
+    v2 = rot @ v1
+    fig, ax = plt.subplots(figsize=(5, 5))
+    ax.quiver(0, 0, v1[0], v1[1], angles="xy", scale_units="xy", scale=1, color="tab:blue", label="v1")
+    ax.quiver(0, 0, v2[0], v2[1], angles="xy", scale_units="xy", scale=1, color="tab:red", label="v2")
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
+    ax.set_aspect("equal")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    st.pyplot(fig)
 
 
 def main():
     st.set_page_config(page_title="RL & Finance Lab", layout="wide")
     st.title("RL & Quant Finance Lab")
-    st.caption("Onglets restructurés par famille : Agents RL / Pricing & Hedging / Signals / Strategies / Extras.")
+    st.caption("Onglets restructurés : Agents RL / Pricing & Hedging / Signals / Strategies / NLP Sentiment / Notebooks.")
 
-    tabs_main = st.tabs(["Agents RL", "Pricing & Hedging", "Signals", "Strategies", "Extras"])
+    tabs_main = st.tabs(
+        ["Agents RL", "Pricing & Hedging", "Signals", "Strategies", "NLP Sentiment", "Notebooks"]
+    )
 
     with tabs_main[0]:
         rl_tabs = st.tabs(["Trading DQL", "Hedging DQL", "Allocation"])
@@ -771,18 +869,27 @@ def main():
             render_signals_yield_curve_prediction()
 
     with tabs_main[3]:
-        strat_tabs = st.tabs(["BTC MA", "Crypto Allocation", "RL SP500", "NLP Sentiment"])
+        strat_tabs = st.tabs(["BTC MA", "Crypto Allocation", "RL SP500"])
         with strat_tabs[0]:
             render_strategies_btc_ma()
         with strat_tabs[1]:
             render_strategies_crypto_allocation()
         with strat_tabs[2]:
             render_strategies_rl_sp500()
-        with strat_tabs[3]:
-            render_strategies_nlp_sentiment()
 
     with tabs_main[4]:
-        render_extra_nlp_notebook()
+        render_strategies_nlp_sentiment()
+
+    with tabs_main[5]:
+        nb_tabs = st.tabs(["NLP Overview", "Wordcloud", "Doc Vectors", "Cosine Sim"])
+        with nb_tabs[0]:
+            render_extra_nlp_overview()
+        with nb_tabs[1]:
+            render_extra_nlp_wordcloud()
+        with nb_tabs[2]:
+            render_extra_nlp_vectors()
+        with nb_tabs[3]:
+            render_extra_nlp_cosine()
 
 
 if __name__ == "__main__":

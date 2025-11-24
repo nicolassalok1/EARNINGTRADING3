@@ -17,3 +17,5 @@ keras
 scikeras
 quandl
 ibapi
+plotly
+wordcloud

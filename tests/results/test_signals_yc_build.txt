@@ -1,30 +1,19 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________________ test_yield_curve_build_pca_shapes _______________________
 
-==================================== ERRORS ====================================
-_______________ ERROR collecting tests/test_signals_yc_build.py ________________
-/usr/local/py-utils/venvs/pytest/lib/python3.11/site-packages/_pytest/python.py:498: in importtestmodule
-    mod = import_path(
-/usr/local/py-utils/venvs/pytest/lib/python3.11/site-packages/_pytest/pathlib.py:587: in import_path
-    importlib.import_module(module_name)
-/usr/local/lib/python3.11/importlib/__init__.py:126: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-<frozen importlib._bootstrap>:1204: in _gcd_import
-    ???
-<frozen importlib._bootstrap>:1176: in _find_and_load
-    ???
-<frozen importlib._bootstrap>:1147: in _find_and_load_unlocked
-    ???
-<frozen importlib._bootstrap>:690: in _load_unlocked
-    ???
-/usr/local/py-utils/venvs/pytest/lib/python3.11/site-packages/_pytest/assertion/rewrite.py:186: in exec_module
-    exec(co, module.__dict__)
-tests/test_signals_yc_build.py:1: in <module>
-    from streamlit_app import load_next_csv, pca_svd
-E     File "/workspaces/EARNINGTRADING3/streamlit_app.py", line 338
-E       *** End Patch***
-E       ^^
-E   SyntaxError: invalid syntax
+    def test_yield_curve_build_pca_shapes():
+        yc = load_next_csv("yield_curve_construction/data/DownloadedData.csv", parse_dates=["DATE"]).set_index("DATE")
+        comps, scores, explained = pca_svd(yc.values, n_components=3)
+        assert comps.shape[0] == 3
+        assert scores.shape[0] == yc.shape[0]
+>       assert len(explained) == 3
+E       assert 8 == 3
+E        +  where 8 = len(array([0.9524868 , 0.04397261, 0.00312241, 0.00037161, 0.00003895,\n       0.00000541, 0.00000139, 0.00000083]))
+
+tests/test_signals_yc_build.py:9: AssertionError
+----------------------------- Captured stderr call -----------------------------
+2025-11-24 21:26:28.987 WARNING streamlit.runtime.caching.cache_data_api: No runtime found, using MemoryCacheStorageManager
 =========================== short test summary info ============================
-ERROR tests/test_signals_yc_build.py
-!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
-1 error in 0.15s
+FAILED tests/test_signals_yc_build.py::test_yield_curve_build_pca_shapes - as...
+1 failed in 2.51s
